@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://github.com/ndthuan/plaindb/discussions
+    about: Questions and ideas go to Discussions, not an issue.
+  - name: Report a vulnerability
+    url: https://github.com/ndthuan/plaindb/security/advisories/new
+    about: Privately, as SECURITY.md says. Please do not open a public issue.
