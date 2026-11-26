@@ -26,6 +26,7 @@
                 "version_conflict",
                 "invalid_name",
                 "invalid_document",
+                "invalid_config",
                 "schema_violation",
                 "unique_violation",
                 "invalid_query",

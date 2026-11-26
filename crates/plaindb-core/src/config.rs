@@ -66,6 +66,124 @@ pub struct StoreConfig {
     pub limits: Limits,
 }
 
+pub const SETTING_KEYS: &[&str] = &[
+    "commit",
+    "push",
+    "remote",
+    "branch",
+    "lock_timeout_ms",
+    "durability",
+    "gc_every",
+    "git_binary",
+    "limits.max_document_bytes",
+    "limits.max_results",
+    "limits.max_scan_ms",
+];
+
+fn unknown_setting(key: &str) -> Error {
+    Error::invalid_name("setting", key).with_detail("known", SETTING_KEYS.join(", "))
+}
+
+fn invalid_value(key: &str, expected: &str) -> Error {
+    Error::new(ErrorCode::InvalidConfig, format!("{key} takes {expected}")).with_detail("key", key)
+}
+
+fn parse_name(key: &str, value: &str) -> Result<String> {
+    let valid =
+        !value.is_empty() && !value.starts_with('-') && !value.contains(char::is_whitespace);
+    if valid {
+        Ok(value.to_owned())
+    } else {
+        Err(invalid_value(
+            key,
+            "a name without spaces that does not start with -",
+        ))
+    }
+}
+
+fn parse_count(key: &str, value: &str) -> Result<u64> {
+    value
+        .parse()
+        .map_err(|_| invalid_value(key, "a whole number"))
+}
+
+fn parse_limit(key: &str, value: &str) -> Result<Option<u64>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        parse_count(key, value).map(Some)
+    }
+}
+
+fn parse_choice<T: Copy>(key: &str, value: &str, choices: &[(&str, T)]) -> Result<T> {
+    choices
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(_, choice)| *choice)
+        .ok_or_else(|| {
+            let names: Vec<&str> = choices.iter().map(|(name, _)| *name).collect();
+            invalid_value(key, &format!("one of {}", names.join(", ")))
+        })
+}
+
+impl StoreConfig {
+    pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
+        match key {
+            "commit" => {
+                self.commit = parse_choice(
+                    key,
+                    value,
+                    &[("each", CommitMode::Each), ("manual", CommitMode::Manual)],
+                )?;
+            }
+            "push" => {
+                self.push = parse_choice(
+                    key,
+                    value,
+                    &[("off", PushMode::Off), ("on-commit", PushMode::OnCommit)],
+                )?;
+            }
+            "durability" => {
+                self.durability = parse_choice(
+                    key,
+                    value,
+                    &[
+                        ("full", Durability::Full),
+                        ("normal", Durability::Normal),
+                        ("off", Durability::Off),
+                    ],
+                )?;
+            }
+            "remote" => self.remote = parse_name(key, value)?,
+            "branch" => self.branch = parse_name(key, value)?,
+            "lock_timeout_ms" => self.lock_timeout_ms = parse_count(key, value)?,
+            "gc_every" => self.gc_every = parse_count(key, value)?,
+            "git_binary" => {
+                let path = value.trim();
+                self.git_binary = (!path.is_empty()).then(|| path.to_owned());
+            }
+            "limits.max_document_bytes" => {
+                self.limits.max_document_bytes = parse_limit(key, value)?;
+            }
+            "limits.max_results" => self.limits.max_results = parse_limit(key, value)?,
+            "limits.max_scan_ms" => self.limits.max_scan_ms = parse_limit(key, value)?,
+            _ => return Err(unknown_setting(key)),
+        }
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Value> {
+        if !SETTING_KEYS.contains(&key) {
+            return Err(unknown_setting(key));
+        }
+        let mut value = serde_json::to_value(self).unwrap_or_default();
+        for part in key.split('.') {
+            value = value.get(part).cloned().unwrap_or(Value::Null);
+        }
+        Ok(value)
+    }
+}
+
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {

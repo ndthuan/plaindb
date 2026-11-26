@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::config::{CollectionMeta, Durability, Format, IndexSpec, STORE_FORMAT, to_file_bytes};
+use crate::config::{
+    CollectionMeta, CommitMode, Durability, Format, IndexSpec, STORE_FORMAT, to_file_bytes,
+};
 use crate::error::{Error, ErrorCode, Result};
 use crate::git;
 use crate::index::Indexes;
@@ -176,21 +178,32 @@ impl Store {
         )
     }
 
-    pub fn set_durability(&self, durability: Durability) -> Result<()> {
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let _push = self.push_guard();
         let _lock = self.begin_write()?;
-        let mut config = read_config(&self.root)?;
-        if config.durability == durability {
+        let before = read_config(&self.root)?;
+        let mut config = before.clone();
+        config.set(key, value)?;
+        if config == before {
             return Ok(());
         }
-        config.durability = durability;
+        let subject = format!("meta store: set {key}");
         self.commit_admin(
-            &format!("meta store: set durability {}", durability.as_str()),
+            &subject,
             vec![JournalEntry::write(
                 STORE_FILE.to_owned(),
                 &to_file_bytes(&config),
                 None,
             )],
-        )
+        )?;
+        self.config.store(Arc::new(config.clone()));
+        if key == "commit" && config.git && before.commit == CommitMode::Manual {
+            self.commit_pending(Some(&subject), None)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_durability(&self, durability: Durability) -> Result<()> {
+        self.set_setting("durability", durability.as_str())
     }
 }

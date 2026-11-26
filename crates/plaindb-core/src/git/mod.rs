@@ -419,27 +419,13 @@ impl Store {
     }
 
     pub fn set_commit_mode(&self, mode: CommitMode) -> Result<()> {
-        let _push = self.push_guard();
-        let _lock = self.begin_write()?;
-        let mut config = read_config(&self.root)?;
-        if config.commit == mode {
-            return Ok(());
-        }
-        let previous = config.commit;
-        config.commit = mode;
-        let subject = "meta store: set commit";
-        self.commit_admin(
-            subject,
-            vec![JournalEntry::write(
-                STORE_FILE.to_owned(),
-                &to_file_bytes(&config),
-                None,
-            )],
-        )?;
-        if config.git && previous == CommitMode::Manual {
-            self.commit_pending(Some(subject), None)?;
-        }
-        Ok(())
+        self.set_setting(
+            "commit",
+            match mode {
+                CommitMode::Each => "each",
+                CommitMode::Manual => "manual",
+            },
+        )
     }
 
     pub fn commit(&self, message: Option<&str>, actor: Option<&str>) -> Result<Option<CommitId>> {
@@ -451,7 +437,7 @@ impl Store {
         self.commit_pending(message, actor)
     }
 
-    fn commit_pending(
+    pub(crate) fn commit_pending(
         &self,
         message: Option<&str>,
         actor: Option<&str>,

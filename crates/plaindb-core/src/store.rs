@@ -64,7 +64,7 @@ impl WriterState {
 #[derive(Debug)]
 pub struct Store {
     pub(crate) root: PathBuf,
-    pub(crate) config: StoreConfig,
+    pub(crate) config: ArcSwap<StoreConfig>,
     pub(crate) snapshot: ArcSwap<Snapshot>,
     pub(crate) writer: Mutex<WriterState>,
 }
@@ -207,11 +207,11 @@ impl Store {
         let writer = Mutex::new(WriterState::new(&config));
         let store = Self {
             root,
-            config,
+            config: ArcSwap::from_pointee(config),
             snapshot,
             writer,
         };
-        if store.config.git {
+        if store.config.load().git {
             store.turn_git_on(git::INIT_STORE_SUBJECT)?;
         }
         Ok(store)
@@ -228,7 +228,7 @@ impl Store {
         let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
         Ok(Self {
             root,
-            config,
+            config: ArcSwap::from_pointee(config),
             snapshot,
             writer: Mutex::new(writer),
         })
@@ -255,15 +255,20 @@ impl Store {
     }
 
     pub(crate) fn lock_timeout(&self) -> Duration {
-        Duration::from_millis(self.config.lock_timeout_ms)
+        Duration::from_millis(self.config.load().lock_timeout_ms)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn config(&self) -> &StoreConfig {
-        &self.config
+    pub fn config(&self) -> Arc<StoreConfig> {
+        if let Ok(current) = read_config(&self.root)
+            && current != **self.config.load()
+        {
+            self.config.store(Arc::new(current));
+        }
+        self.config.load_full()
     }
 
     pub fn list_dbs(&self) -> Result<Vec<String>> {

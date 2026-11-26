@@ -26,6 +26,7 @@ fn error_codes_are_pinned() {
         (ErrorCode::VersionConflict, "version_conflict"),
         (ErrorCode::InvalidName, "invalid_name"),
         (ErrorCode::InvalidDocument, "invalid_document"),
+        (ErrorCode::InvalidConfig, "invalid_config"),
         (ErrorCode::SchemaViolation, "schema_violation"),
         (ErrorCode::UniqueViolation, "unique_violation"),
         (ErrorCode::InvalidQuery, "invalid_query"),

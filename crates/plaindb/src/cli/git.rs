@@ -29,7 +29,7 @@ pub fn enable(store: &Store) -> Result<Output> {
 
 pub fn set_remote(store: &Store, args: &RemoteSetArgs) -> Result<Output> {
     store.set_remote(&args.url)?;
-    let remote = super::admin::read_settings(store)?.remote;
+    let remote = store.config().remote.clone();
     Ok(Output::text(
         json!({ "remote": remote, "url": args.url }),
         format!("{remote} is {}", args.url),

@@ -419,7 +419,8 @@ fn schemas_and_indexes_are_managed_from_the_command_line() {
 fn settings_are_read_and_changed() {
     let dir = store_with_collection("json");
     let all = succeed(dir.path(), "config", &["config", "get"]);
-    assert_eq!(all["value"]["commit"], "each");
+    assert_eq!(all["value"]["commit"]["value"], "each");
+    assert_eq!(all["value"]["commit"]["default"], true);
     let limit = succeed(
         dir.path(),
         "config",
@@ -457,11 +458,11 @@ fn settings_are_read_and_changed() {
     );
     assert_eq!(
         fail(dir.path(), &["config", "set", "lock_timeout_ms", "soon"]),
-        "invalid_document"
+        "invalid_config"
     );
     assert_eq!(
         fail(dir.path(), &["config", "set", "commit", "sometimes"]),
-        "invalid_document"
+        "invalid_config"
     );
     assert_eq!(
         fail(dir.path(), &["config", "set", "colour", "red"]),
@@ -471,6 +472,65 @@ fn settings_are_read_and_changed() {
         fail(dir.path(), &["config", "get", "colour"]),
         "invalid_name"
     );
+}
+
+#[test]
+fn the_newer_settings_round_trip() {
+    let dir = store_with_collection("json");
+    for (key, value, expected) in [
+        ("durability", "normal", json!("normal")),
+        ("durability", "off", json!("off")),
+        ("gc_every", "0", json!(0)),
+        ("gc_every", "25", json!(25)),
+        ("git_binary", "/path/to/git", json!("/path/to/git")),
+        ("git_binary", "", Value::Null),
+    ] {
+        let set = succeed(dir.path(), "config", &["config", "set", key, value]);
+        assert_eq!(set["value"], expected);
+        assert_eq!(
+            succeed(dir.path(), "config", &["config", "get", key])["value"],
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_bad_setting_value_writes_nothing() {
+    let dir = store_with_collection("json");
+    let before = std::fs::read(dir.path().join("_store.json")).unwrap();
+    for (key, value) in [
+        ("durability", "sturdy"),
+        ("gc_every", "often"),
+        ("gc_every", "-1"),
+        ("push", "always"),
+    ] {
+        assert_eq!(
+            fail(dir.path(), &["config", "set", key, value]),
+            "invalid_config"
+        );
+    }
+    assert_eq!(
+        std::fs::read(dir.path().join("_store.json")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn the_listing_marks_what_differs_from_the_default() {
+    let dir = store_with_collection("json");
+    succeed(dir.path(), "config", &["config", "set", "gc_every", "9"]);
+    let all = succeed(dir.path(), "config", &["config", "get"]);
+    assert_eq!(
+        all["value"]["gc_every"],
+        json!({"value": 9, "default": false})
+    );
+    assert_eq!(
+        all["value"]["durability"],
+        json!({"value": "full", "default": true})
+    );
+    for key in ["git_binary", "limits.max_scan_ms", "branch", "remote"] {
+        assert!(all["value"].get(key).is_some(), "{key}");
+    }
 }
 
 #[test]

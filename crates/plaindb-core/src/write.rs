@@ -591,7 +591,7 @@ impl Store {
         let snapshot = self.snapshot.load_full();
         let mut planner = Planner {
             snapshot: &snapshot,
-            max_document_bytes: self.config.limits.max_document_bytes,
+            max_document_bytes: self.config.load().limits.max_document_bytes,
             keep_timestamps: tx.keep_timestamps,
             now: now_timestamp(),
             targets: BTreeMap::new(),

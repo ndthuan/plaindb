@@ -301,20 +301,12 @@ impl Store {
     }
 
     pub fn set_push(&self, mode: PushMode) -> Result<()> {
-        let _push = self.push_guard();
-        let _lock = self.begin_write()?;
-        let mut config = read_config(&self.root)?;
-        if config.push == mode {
-            return Ok(());
-        }
-        config.push = mode;
-        self.commit_admin(
-            "meta store: set push",
-            vec![crate::journal::JournalEntry::write(
-                crate::store::STORE_FILE.to_owned(),
-                &to_file_bytes(&config),
-                None,
-            )],
+        self.set_setting(
+            "push",
+            match mode {
+                PushMode::Off => "off",
+                PushMode::OnCommit => "on-commit",
+            },
         )
     }
 }

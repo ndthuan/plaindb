@@ -1,15 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use plaindb_core::config::{StoreConfig, from_file_bytes, to_file_bytes};
-use plaindb_core::store::STORE_FILE;
+use plaindb_core::config::{SETTING_KEYS, StoreConfig};
 use plaindb_core::{
-    CommitMode, Error, ErrorCode, Format, IndexSpec, PushMode, Result, Store, WriteLock, cache,
-    write_atomic,
+    CommitMode, Error, ErrorCode, Format, IndexSpec, PushMode, Result, Store, cache,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::output::Output;
 use super::read::{CollectionArgs, DbArgs, invalid_entries};
@@ -118,82 +115,12 @@ pub struct IndexDropArgs {
     pub target: String,
 }
 
-const SETTING_NAMES: &str = "commit, push, remote, branch, lock_timeout_ms, limits.max_document_bytes, limits.max_results, limits.max_scan_ms";
-
-pub fn read_settings(store: &Store) -> Result<StoreConfig> {
-    from_file_bytes(&fs::read(store.root().join(STORE_FILE))?)
-}
-
-fn unknown_setting(key: &str) -> Error {
-    Error::invalid_name("setting", key).with_detail("known", SETTING_NAMES)
-}
-
-fn invalid_value(key: &str, expected: &str) -> Error {
-    Error::invalid_document("invalid_value", format!("{key} takes {expected}"))
-        .with_detail("key", key)
-}
-
-fn parse_name(key: &str, value: &str) -> Result<String> {
-    let valid =
-        !value.is_empty() && !value.starts_with('-') && !value.contains(char::is_whitespace);
-    if valid {
-        Ok(value.to_owned())
-    } else {
-        Err(invalid_value(
-            key,
-            "a name without spaces that does not start with -",
-        ))
-    }
-}
-
-fn parse_count(key: &str, value: &str) -> Result<u64> {
-    value
-        .parse()
-        .map_err(|_| invalid_value(key, "a whole number"))
-}
-
-fn parse_limit(key: &str, value: &str) -> Result<Option<u64>> {
-    if value.is_empty() {
-        Ok(None)
-    } else {
-        parse_count(key, value).map(Some)
-    }
-}
-
-fn apply_setting(config: &mut StoreConfig, key: &str, value: &str) -> Result<()> {
-    match key {
-        "remote" => config.remote = parse_name(key, value)?,
-        "branch" => config.branch = parse_name(key, value)?,
-        "lock_timeout_ms" => config.lock_timeout_ms = parse_count(key, value)?,
-        "limits.max_document_bytes" => {
-            config.limits.max_document_bytes = parse_limit(key, value)?;
-        }
-        "limits.max_results" => config.limits.max_results = parse_limit(key, value)?,
-        "limits.max_scan_ms" => config.limits.max_scan_ms = parse_limit(key, value)?,
-        _ => return Err(unknown_setting(key)),
-    }
-    Ok(())
-}
-
-fn setting_value(config: &StoreConfig, key: &str) -> Result<Value> {
-    let mut value = serde_json::to_value(config).unwrap_or_default();
-    for part in key.split('.') {
-        value = value
-            .get(part)
-            .cloned()
-            .ok_or_else(|| unknown_setting(key))?;
-    }
-    Ok(value)
-}
-
 fn setting_output(key: Option<&str>, value: Value) -> Output {
     let text = match &value {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    let pretty = serde_json::to_string_pretty(&value).unwrap_or_default();
-    let human = if key.is_some() { text } else { pretty };
-    Output::text(json!({ "key": key, "value": value }), human)
+    Output::text(json!({ "key": key, "value": value }), text)
 }
 
 pub fn init(context: &Context, args: &InitArgs) -> Result<Output> {
@@ -214,7 +141,7 @@ pub fn init(context: &Context, args: &InitArgs) -> Result<Output> {
     if let Some(url) = &args.remote {
         store.set_remote(url)?;
     }
-    let settings = read_settings(&store)?;
+    let settings = store.config();
     Ok(Output::text(
         json!({
             "git": settings.git,
@@ -226,59 +153,43 @@ pub fn init(context: &Context, args: &InitArgs) -> Result<Output> {
     ))
 }
 
+fn listing(config: &StoreConfig) -> Result<(Value, Vec<String>)> {
+    let defaults = StoreConfig::default();
+    let mut entries = Map::new();
+    let mut lines = Vec::new();
+    for key in SETTING_KEYS {
+        let value = config.setting(key)?;
+        let is_default = value == defaults.setting(key)?;
+        lines.push(format!(
+            "{key} = {value}{}",
+            if is_default { " (default)" } else { "" }
+        ));
+        entries.insert(
+            (*key).to_owned(),
+            json!({ "value": value, "default": is_default }),
+        );
+    }
+    Ok((Value::Object(entries), lines))
+}
+
 pub fn config_get(store: &Store, args: &ConfigGetArgs) -> Result<Output> {
-    let settings = read_settings(store)?;
-    let value = match &args.key {
-        Some(key) => setting_value(&settings, key)?,
-        None => serde_json::to_value(&settings).unwrap_or_default(),
-    };
-    Ok(setting_output(args.key.as_deref(), value))
-}
-
-fn commit_setting(store: &Store, context: &Context, key: &str) -> Result<()> {
-    let settings = read_settings(store)?;
-    if settings.git && settings.commit == CommitMode::Each {
-        store.commit(
-            Some(&format!("meta store: set {key}")),
-            context.actor.as_deref(),
-        )?;
+    let config = store.config();
+    match &args.key {
+        Some(key) => Ok(setting_output(Some(key), config.setting(key)?)),
+        None => {
+            let (value, lines) = listing(&config)?;
+            Ok(Output::lines(json!({ "key": null, "value": value }), lines))
+        }
     }
-    Ok(())
-}
-
-fn write_setting(store: &Store, context: &Context, key: &str, value: &str) -> Result<()> {
-    let lock = WriteLock::acquire(
-        store.root(),
-        Duration::from_millis(store.config().lock_timeout_ms),
-    )?;
-    let before = read_settings(store)?;
-    let mut config = before.clone();
-    apply_setting(&mut config, key, value)?;
-    if config == before {
-        return Ok(());
-    }
-    write_atomic(&store.root().join(STORE_FILE), &to_file_bytes(&config))?;
-    drop(lock);
-    commit_setting(store, context, key)
 }
 
 pub fn config_set(context: &Context, args: &ConfigSetArgs) -> Result<Output> {
     let store = context.open()?;
-    match args.key.as_str() {
-        "commit" => store.set_commit_mode(match args.value.as_str() {
-            "each" => CommitMode::Each,
-            "manual" => CommitMode::Manual,
-            _ => return Err(invalid_value("commit", "each or manual")),
-        })?,
-        "push" => store.set_push(match args.value.as_str() {
-            "off" => PushMode::Off,
-            "on-commit" => PushMode::OnCommit,
-            _ => return Err(invalid_value("push", "off or on-commit")),
-        })?,
-        key => write_setting(&store, context, key, &args.value)?,
-    }
-    let value = setting_value(&read_settings(&store)?, &args.key)?;
-    Ok(setting_output(Some(&args.key), value))
+    store.set_setting(&args.key, &args.value)?;
+    Ok(setting_output(
+        Some(&args.key),
+        store.config().setting(&args.key)?,
+    ))
 }
 
 fn collection_ack(args: &CollectionArgs, extra: Value) -> Value {

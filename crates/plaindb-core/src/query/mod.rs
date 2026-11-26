@@ -193,14 +193,14 @@ impl Store {
                 "the limit must be positive",
             ));
         }
-        let cap = self.config.limits.max_results;
+        let cap = self.config.load().limits.max_results;
         let limit = query
             .limit
             .unwrap_or(DEFAULT_LIMIT)
             .min(cap.unwrap_or(u64::MAX));
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         self.with_collection(&query.db, &query.coll, |collection| {
-            let found = matched(collection, &filter, &self.config.limits)?;
+            let found = matched(collection, &filter, &self.config.load().limits)?;
             let mut keyed: Vec<(Vec<Value>, &DocEntry)> = found
                 .into_iter()
                 .map(|entry| (entry_keys(entry, &sort), entry))
@@ -234,7 +234,7 @@ impl Store {
     pub fn count(&self, db: &str, coll: &str, filter: &Value) -> Result<u64> {
         let filter = Filter::parse(filter)?;
         self.with_collection(db, coll, |collection| {
-            let found = matched(collection, &filter, &self.config.limits)?;
+            let found = matched(collection, &filter, &self.config.load().limits)?;
             Ok(u64::try_from(found.len()).unwrap_or(u64::MAX))
         })
     }
@@ -243,7 +243,7 @@ impl Store {
         let filter = Filter::parse(filter)?;
         let path = filter::split_path(path)?;
         self.with_collection(db, coll, |collection| {
-            let found = matched(collection, &filter, &self.config.limits)?;
+            let found = matched(collection, &filter, &self.config.load().limits)?;
             let mut values = BTreeSet::new();
             for entry in found {
                 for value in filter::elements(&entry.doc, &path) {
