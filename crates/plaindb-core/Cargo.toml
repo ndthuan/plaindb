@@ -11,6 +11,9 @@ test-hooks = []
 testgen = []
 
 [dependencies]
+arc-swap = "1.9.5"
+jsonschema = { version = "0.63.1", default-features = false }
+rpds = "1.2.1"
 serde-saphyr = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }

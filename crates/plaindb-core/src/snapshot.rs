@@ -1,0 +1,101 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
+
+use crate::codec::Doc;
+use crate::config::{CollectionMeta, Format};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocEntry {
+    pub version: String,
+    pub doc: Arc<Doc>,
+    pub id_mismatch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invalid {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    Doc(DocEntry),
+    Invalid(Invalid),
+    BadName { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileEntry {
+    pub id: String,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollectionSnapshot {
+    pub meta: CollectionMeta,
+    pub files: RedBlackTreeMapSync<String, FileEntry>,
+    pub case_duplicates: RedBlackTreeSetSync<String>,
+}
+
+impl CollectionSnapshot {
+    pub fn file_name(&self, id: &str) -> String {
+        format!("{id}.{}", self.meta.format.extension())
+    }
+
+    pub fn format(&self) -> Format {
+        self.meta.format
+    }
+
+    pub fn is_duplicate(&self, file_name: &str) -> bool {
+        self.case_duplicates.contains(file_name)
+    }
+
+    pub fn readable_docs(&self) -> impl Iterator<Item = (&String, &DocEntry)> {
+        self.files
+            .iter()
+            .filter_map(|(name, entry)| match &entry.outcome {
+                Outcome::Doc(doc) if !self.is_duplicate(name) => Some((name, doc)),
+                _ => None,
+            })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DbSnapshot {
+    pub collections: RedBlackTreeMapSync<String, CollectionSnapshot>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub generation: u64,
+    pub dbs: RedBlackTreeMapSync<String, DbSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFile {
+    pub db: String,
+    pub collection: String,
+    pub id: String,
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Warning {
+    pub code: String,
+    pub db: String,
+    pub collection: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    pub invalid: Vec<InvalidFile>,
+    pub warnings: Vec<Warning>,
+    pub documents: u64,
+    pub store_bytes: u64,
+}

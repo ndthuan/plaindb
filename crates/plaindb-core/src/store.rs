@@ -1,12 +1,18 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+
+use crate::codec::Doc;
 use crate::config::{
     CollectionMeta, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::names::{validate_collection_name, validate_db_name, validate_id};
+use crate::scan;
+use crate::snapshot::{CollectionSnapshot, InvalidFile, Outcome, Snapshot, Status, Warning};
 
 pub const STORE_FILE: &str = "_store.json";
 pub const DB_FILE: &str = "_db.json";
@@ -17,13 +23,16 @@ pub const STATE_DIR: &str = ".plaindb";
 pub struct Store {
     root: PathBuf,
     config: StoreConfig,
+    snapshot: ArcSwap<Snapshot>,
 }
+
+pub type Version = String;
 
 fn directory_is_empty(dir: &Path) -> Result<bool> {
     Ok(fs::read_dir(dir)?.next().is_none())
 }
 
-fn child_directories(
+pub(crate) fn child_directories(
     dir: &Path,
     marker: &str,
     valid: fn(&str) -> Result<()>,
@@ -77,7 +86,12 @@ impl Store {
         let config = StoreConfig::default();
         fs::write(root.join(STORE_FILE), to_file_bytes(&config))?;
         fs::create_dir_all(root.join(STATE_DIR))?;
-        Ok(Self { root, config })
+        let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
+        Ok(Self {
+            root,
+            config,
+            snapshot,
+        })
     }
 
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
@@ -104,7 +118,12 @@ impl Store {
             .with_detail("found", config.format)
             .with_detail("supported", STORE_FORMAT));
         }
-        Ok(Self { root, config })
+        let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
+        Ok(Self {
+            root,
+            config,
+            snapshot,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -164,5 +183,126 @@ impl Store {
             .join(db)
             .join(collection)
             .join(format!("{id}.{}", format.extension())))
+    }
+
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        self.snapshot.load_full()
+    }
+
+    pub fn rescan(&self) -> Result<()> {
+        let next = scan::rescan(&self.root, &self.snapshot.load())?;
+        self.snapshot.store(Arc::new(next));
+        Ok(())
+    }
+
+    fn with_collection<T>(
+        &self,
+        db: &str,
+        collection: &str,
+        read: impl FnOnce(&CollectionSnapshot) -> Result<T>,
+    ) -> Result<T> {
+        validate_db_name(db)?;
+        validate_collection_name(collection)?;
+        let snapshot = self.snapshot.load();
+        let db_snapshot = snapshot
+            .dbs
+            .get(db)
+            .ok_or_else(|| Error::not_found("db", db))?;
+        let collection_snapshot = db_snapshot
+            .collections
+            .get(collection)
+            .ok_or_else(|| Error::not_found("collection", collection))?;
+        read(collection_snapshot)
+    }
+
+    pub fn get(&self, db: &str, collection: &str, id: &str) -> Result<Option<(Doc, Version)>> {
+        validate_id(id)?;
+        self.with_collection(db, collection, |snapshot| {
+            let name = snapshot.file_name(id);
+            let Some(entry) = snapshot.files.get(&name) else {
+                return Ok(None);
+            };
+            let refused = |reason: &str| {
+                Error::invalid_document(reason, format!("document {id} is invalid"))
+                    .with_detail("id", id)
+            };
+            if snapshot.is_duplicate(&name) {
+                return Err(refused("duplicate_id_case"));
+            }
+            match &entry.outcome {
+                Outcome::Doc(found) => Ok(Some(((*found.doc).clone(), found.version.clone()))),
+                Outcome::Invalid(invalid) => Err(refused(&invalid.reason)),
+                Outcome::BadName { .. } => Ok(None),
+            }
+        })
+    }
+
+    pub fn list_ids(&self, db: &str, collection: &str) -> Result<Vec<String>> {
+        self.with_collection(db, collection, |snapshot| {
+            Ok(snapshot
+                .readable_docs()
+                .map(|(_, entry)| entry.doc["_id"].as_str().unwrap_or_default().to_owned())
+                .collect())
+        })
+    }
+
+    pub fn status(&self) -> Status {
+        let snapshot = self.snapshot.load();
+        let mut status = Status {
+            invalid: Vec::new(),
+            warnings: Vec::new(),
+            documents: 0,
+            store_bytes: 0,
+        };
+        for (db, db_snapshot) in snapshot.dbs.iter() {
+            for (collection, collection_snapshot) in db_snapshot.collections.iter() {
+                for (name, entry) in collection_snapshot.files.iter() {
+                    status.store_bytes += entry.size;
+                    let duplicate = collection_snapshot.is_duplicate(name);
+                    let mut invalid = |path: &Path, reason: &str| {
+                        status.invalid.push(InvalidFile {
+                            db: db.clone(),
+                            collection: collection.clone(),
+                            id: entry.id.clone(),
+                            path: path.to_path_buf(),
+                            reason: reason.to_owned(),
+                        });
+                    };
+                    match &entry.outcome {
+                        Outcome::Doc(found) => {
+                            let path = self.root.join(db).join(collection).join(name);
+                            if duplicate {
+                                invalid(&path, "duplicate_id_case");
+                                continue;
+                            }
+                            status.documents += 1;
+                            if found.id_mismatch {
+                                status.warnings.push(Warning {
+                                    code: "id_mismatch".to_owned(),
+                                    db: db.clone(),
+                                    collection: collection.clone(),
+                                    path,
+                                });
+                            }
+                        }
+                        Outcome::Invalid(found) => {
+                            let reason = if duplicate {
+                                "duplicate_id_case"
+                            } else {
+                                &found.reason
+                            };
+                            invalid(&found.path, reason);
+                        }
+                        Outcome::BadName { path } => status.warnings.push(Warning {
+                            code: "invalid_name".to_owned(),
+                            db: db.clone(),
+                            collection: collection.clone(),
+                            path: path.clone(),
+                        }),
+                    }
+                }
+            }
+        }
+        status
     }
 }
