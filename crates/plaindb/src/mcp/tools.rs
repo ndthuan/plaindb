@@ -9,11 +9,11 @@ use serde_json::Value;
 
 use super::inputs::{
     AddIndexInput, CollectionInput, CommitInput, CountInput, CreateCollectionInput, DbInput,
-    DeleteInput, DistinctInput, DropIndexInput, FindInput, GetInput, HistoryInput, InsertInput,
-    NoInput, PatchInput, PushInput, PutInput, SetSchemaInput, TxInput,
+    DeleteInput, DistinctInput, DoctorInput, DropIndexInput, FindInput, GetInput, HistoryInput,
+    InsertInput, NoInput, PatchInput, PushInput, PutInput, SetSchemaInput, TxInput,
 };
 use crate::cli::output::Output;
-use crate::cli::{Context, admin, git, read, write};
+use crate::cli::{Context, admin, doctor, git, read, write};
 
 const NOTICE: &str = "Do not touch store files directly.";
 
@@ -94,6 +94,12 @@ pub fn catalog() -> Vec<Tool> {
             "plaindb_status",
             "Shows the state of the store: document counts, invalid files, warnings and git.",
             |context, _: NoInput| Ok(read::status(&context.open()?)?),
+        ),
+        tool(
+            Read,
+            "plaindb_doctor",
+            "Checks the store and its environment and lists every problem with the command that fixes it. Changes nothing.",
+            |context, input: DoctorInput| Ok(doctor::run(context, &input.into())),
         ),
         tool(
             Read,

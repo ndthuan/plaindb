@@ -15,6 +15,7 @@ pub enum Human {
 pub struct Output {
     pub result: Value,
     pub human: Human,
+    pub exit_code: u8,
 }
 
 impl Output {
@@ -22,6 +23,7 @@ impl Output {
         Self {
             result,
             human: Human::Pretty,
+            exit_code: 0,
         }
     }
 
@@ -29,6 +31,7 @@ impl Output {
         Self {
             result,
             human: Human::Lines(lines),
+            exit_code: 0,
         }
     }
 
@@ -36,13 +39,20 @@ impl Output {
         Self {
             result: Value::Null,
             human: Human::Streamed,
+            exit_code: 0,
         }
+    }
+
+    pub fn with_exit_code(mut self, exit_code: u8) -> Self {
+        self.exit_code = exit_code;
+        self
     }
 
     pub fn text(result: Value, text: impl Into<String>) -> Self {
         Self {
             result,
             human: Human::Text(text.into()),
+            exit_code: 0,
         }
     }
 }

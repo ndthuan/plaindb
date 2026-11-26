@@ -143,33 +143,50 @@ pub fn discard(root: &Path) {
     let _ = fs::remove_file(cache_path(root));
 }
 
-pub fn load(root: &Path) -> Option<Snapshot> {
-    let bytes = fs::read(cache_path(root)).ok()?;
+pub(crate) enum CacheRead {
+    Missing,
+    Unusable { discard: bool },
+    Usable(Snapshot),
+}
+
+pub(crate) fn read(root: &Path) -> CacheRead {
+    let Ok(bytes) = fs::read(cache_path(root)) else {
+        return CacheRead::Missing;
+    };
     let mut reader = Cursor::new(bytes);
     let Ok(header) = rmp_serde::decode::from_read::<_, Header>(&mut reader) else {
-        reject(root);
-        return None;
+        return CacheRead::Unusable { discard: true };
     };
     if header.format != CACHE_FORMAT {
-        return None;
+        return CacheRead::Unusable { discard: false };
     }
-    let (hash, metas) = read_metas(root).ok()?;
+    let Ok((hash, metas)) = read_metas(root) else {
+        return CacheRead::Unusable { discard: false };
+    };
     if hash != header.meta_hash {
-        return None;
+        return CacheRead::Unusable { discard: false };
     }
     let Ok(body) = rmp_serde::decode::from_read::<_, Body>(&mut reader) else {
-        reject(root);
-        return None;
+        return CacheRead::Unusable { discard: true };
     };
     if reader.position() != reader.get_ref().len() as u64 {
-        reject(root);
-        return None;
+        return CacheRead::Unusable { discard: true };
     }
-    let snapshot = assemble(root, header.generation, body, metas);
-    if snapshot.is_none() {
-        reject(root);
+    match assemble(root, header.generation, body, metas) {
+        Some(snapshot) => CacheRead::Usable(snapshot),
+        None => CacheRead::Unusable { discard: true },
     }
-    snapshot
+}
+
+pub fn load(root: &Path) -> Option<Snapshot> {
+    match read(root) {
+        CacheRead::Usable(snapshot) => Some(snapshot),
+        CacheRead::Unusable { discard: true } => {
+            reject(root);
+            None
+        }
+        CacheRead::Unusable { discard: false } | CacheRead::Missing => None,
+    }
 }
 
 fn reject(root: &Path) {

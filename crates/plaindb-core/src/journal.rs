@@ -464,6 +464,15 @@ pub(crate) fn checkpoint(root: &Path, state: &mut WriterState) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn record_count(root: &Path) -> usize {
+    fs::read(journal_path(root)).map_or(0, |bytes| {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count()
+    })
+}
+
 pub(crate) fn has_records(root: &Path) -> bool {
     fs::metadata(journal_path(root)).is_ok_and(|metadata| metadata.len() > 0)
 }

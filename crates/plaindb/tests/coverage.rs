@@ -32,6 +32,7 @@ const TABLE: &[Coverage] = &[
     covered("distinct", &["distinct"], &["plaindb_distinct"]),
     covered("history", &["history"], &["plaindb_history"]),
     covered("status", &["status"], &["plaindb_status"]),
+    covered("doctor", &["doctor"], &["plaindb_doctor"]),
     covered("list_dbs", &["db list"], &["plaindb_list_dbs"]),
     covered(
         "list_collections",

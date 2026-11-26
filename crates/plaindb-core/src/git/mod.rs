@@ -1,5 +1,6 @@
 mod command;
 mod commit;
+mod doctor;
 mod foreign;
 mod gc;
 mod history;
@@ -32,6 +33,7 @@ pub use pending::PendingTx;
 pub use push::PushOutcome;
 
 pub(crate) use commit::commit_journal;
+pub(crate) use doctor::checks as doctor_checks;
 pub(crate) use foreign::check_head;
 pub(crate) use pending::append as append_pending;
 
@@ -475,56 +477,7 @@ impl Store {
     }
 
     pub(crate) fn git_status(&self) -> Result<GitStatus> {
-        let config = read_config(&self.root)?;
-        let binary = command::resolve(&config);
-        let found = command::is_available(&binary);
-        let mut status = GitStatus {
-            enabled: config.git,
-            commit: config.commit,
-            branch: config.branch.clone(),
-            head: None,
-            pending_txs: 0,
-            pending_paths: 0,
-            push: config.push,
-            remote: config.remote.clone(),
-            remote_url: None,
-            unpushed: 0,
-            last_push_at: None,
-            last_push_error: None,
-            remote_ahead: false,
-            git_bytes: 0,
-            last_gc_at: None,
-            last_gc_outcome: None,
-            last_gc_error: None,
-            git_binary: binary.program,
-            git_binary_source: binary.source.to_owned(),
-            git_binary_found: found,
-        };
-        if !config.git || !self.root.join(GIT_DIR).exists() {
-            return Ok(status);
-        }
-        let repo = open(&self.root)?;
-        status.head = head_id(&repo)?.map(|id| id.to_string());
-        status.remote_url = push::remote_url(&self.root, &config.remote)?;
-        if status.remote_url.is_some() {
-            status.unpushed = push::unpushed(&self.root, &config)?;
-        }
-        let state = push::read_state(&self.root)?;
-        status.last_push_at = state.last_push_at;
-        status.last_push_error = state.last_push_error;
-        status.remote_ahead = state.remote_ahead;
-        let gc_state = gc::read_state(&self.root)?;
-        status.last_gc_at = gc_state.last_gc_at;
-        status.last_gc_outcome = gc_state.last_gc_outcome;
-        status.last_gc_error = gc_state.last_gc_error;
-        status.git_bytes = push::directory_bytes(&self.root.join(GIT_DIR));
-        if config.commit == CommitMode::Manual {
-            status.pending_txs =
-                u64::try_from(pending::read(&self.root)?.len()).unwrap_or(u64::MAX);
-            status.pending_paths =
-                u64::try_from(commit::worktree_changes(&self.root)?.len()).unwrap_or(u64::MAX);
-        }
-        Ok(status)
+        status_at(&self.root)
     }
 
     pub(crate) fn git_warning(&self) -> Result<Option<(PathBuf, Value)>> {
@@ -535,4 +488,56 @@ impl Store {
             )
         }))
     }
+}
+
+pub(crate) fn status_at(root: &Path) -> Result<GitStatus> {
+    let config = read_config(root)?;
+    let binary = command::resolve(&config);
+    let found = command::is_available(&binary);
+    let mut status = GitStatus {
+        enabled: config.git,
+        commit: config.commit,
+        branch: config.branch.clone(),
+        head: None,
+        pending_txs: 0,
+        pending_paths: 0,
+        push: config.push,
+        remote: config.remote.clone(),
+        remote_url: None,
+        unpushed: 0,
+        last_push_at: None,
+        last_push_error: None,
+        remote_ahead: false,
+        git_bytes: 0,
+        last_gc_at: None,
+        last_gc_outcome: None,
+        last_gc_error: None,
+        git_binary: binary.program,
+        git_binary_source: binary.source.to_owned(),
+        git_binary_found: found,
+    };
+    if !config.git || !root.join(GIT_DIR).exists() {
+        return Ok(status);
+    }
+    let repo = open(root)?;
+    status.head = head_id(&repo)?.map(|id| id.to_string());
+    status.remote_url = push::remote_url(root, &config.remote)?;
+    if status.remote_url.is_some() {
+        status.unpushed = push::unpushed(root, &config)?;
+    }
+    let state = push::read_state(root)?;
+    status.last_push_at = state.last_push_at;
+    status.last_push_error = state.last_push_error;
+    status.remote_ahead = state.remote_ahead;
+    let gc_state = gc::read_state(root)?;
+    status.last_gc_at = gc_state.last_gc_at;
+    status.last_gc_outcome = gc_state.last_gc_outcome;
+    status.last_gc_error = gc_state.last_gc_error;
+    status.git_bytes = push::directory_bytes(&root.join(GIT_DIR));
+    if config.commit == CommitMode::Manual {
+        status.pending_txs = u64::try_from(pending::read(root)?.len()).unwrap_or(u64::MAX);
+        status.pending_paths =
+            u64::try_from(commit::worktree_changes(root)?.len()).unwrap_or(u64::MAX);
+    }
+    Ok(status)
 }

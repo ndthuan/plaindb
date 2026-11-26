@@ -4,6 +4,7 @@ mod boot;
 pub mod cache;
 pub mod codec;
 pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod git;
 mod hooks;
@@ -32,6 +33,7 @@ pub use config::{
     DEFAULT_LOCK_TIMEOUT_MS, Durability, Format, IndexSpec, Limits, PushMode, STORE_FORMAT,
     StoreConfig,
 };
+pub use doctor::{Check, CheckStatus, DoctorOptions, Group, Report};
 pub use error::{Error, ErrorCode, Result};
 pub use git::{
     At, CommitId, DEFAULT_HISTORY_LIMIT, GIT_BINARY_ENV, GcOutcome, GcReport, GitStatus,

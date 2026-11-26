@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::cli::admin::{CollectionCreateArgs, FormatArg, IndexAddArgs, IndexDropArgs};
+use crate::cli::doctor::DoctorArgs;
 use crate::cli::git::{CommitArgs, PushArgs};
 use crate::cli::read::{
     CollectionArgs, CountArgs, DbArgs, DistinctArgs, FindArgs, GetArgs, HistoryArgs,
@@ -350,6 +351,21 @@ impl From<PushInput> for PushArgs {
     fn from(input: PushInput) -> Self {
         Self {
             reset_remote_ahead: input.reset_remote_ahead,
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DoctorInput {
+    #[schemars(description = "Do not contact the remote")]
+    #[serde(default)]
+    pub offline: bool,
+}
+
+impl From<DoctorInput> for DoctorArgs {
+    fn from(input: DoctorInput) -> Self {
+        Self {
+            offline: input.offline,
         }
     }
 }

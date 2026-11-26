@@ -6,6 +6,7 @@ pub const OPERATIONS: &[&str] = &[
     "distinct",
     "history",
     "status",
+    "doctor",
     "list_dbs",
     "list_collections",
     "insert",

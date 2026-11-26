@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod doctor;
 pub mod git;
 pub mod output;
 pub mod read;
@@ -58,6 +59,8 @@ pub enum Command {
     History(read::HistoryArgs),
     #[command(about = "Show the state of the store")]
     Status,
+    #[command(about = "Check the store and its environment, and say how to fix what is wrong")]
+    Doctor(doctor::DoctorArgs),
     #[command(about = "Create a store")]
     Init(admin::InitArgs),
     #[command(subcommand, about = "Read or change the settings of the store")]
@@ -206,6 +209,7 @@ fn run(context: &Context, command: Command) -> Result<Output> {
             read::get_schema(&context.open()?, &args)
         }
         Command::Index(IndexCommand::List(args)) => read::list_indexes(&context.open()?, &args),
+        Command::Doctor(args) => Ok(doctor::run(context, &args)),
         Command::Init(args) => admin::init(context, &args),
         Command::Config(ConfigCommand::Get(args)) => admin::config_get(&context.open()?, &args),
         Command::Config(ConfigCommand::Set(args)) => admin::config_set(context, &args),
@@ -252,7 +256,7 @@ pub fn execute(cli: Cli) -> ExitCode {
     match run(&context, cli.command) {
         Ok(output) => {
             print_success(cli.json, &output);
-            ExitCode::SUCCESS
+            ExitCode::from(output.exit_code)
         }
         Err(error) => {
             print_failure(cli.json, &error);

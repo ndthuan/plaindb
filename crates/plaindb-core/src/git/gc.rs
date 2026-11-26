@@ -77,6 +77,10 @@ fn read_count(root: &Path) -> u64 {
         .commits
 }
 
+pub(crate) fn commits_since_last_gc(root: &Path) -> u64 {
+    read_count(root).saturating_sub(read_state(root).unwrap_or_default().commits_at_last_gc)
+}
+
 pub(crate) fn count_commit(root: &Path) {
     let count = GcCount {
         commits: read_count(root) + 1,

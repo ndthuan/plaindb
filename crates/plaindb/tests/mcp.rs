@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-const READ_TOOLS: [&str; 10] = [
+const READ_TOOLS: [&str; 11] = [
     "plaindb_status",
+    "plaindb_doctor",
     "plaindb_list_dbs",
     "plaindb_list_collections",
     "plaindb_get_schema",
@@ -490,4 +491,22 @@ async fn two_servers_write_to_one_store_without_loss() {
     );
     first.cancel().await.expect("the server stops");
     second.cancel().await.expect("the server stops");
+}
+
+fn without_disk(mut report: Value) -> Value {
+    if let Some(checks) = report["checks"].as_array_mut() {
+        checks.retain(|check| check["id"] != "disk_space");
+    }
+    report
+}
+
+#[tokio::test]
+async fn doctor_is_offered_read_only_and_matches_the_command_line() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &["--read-only"]).await;
+    let reported = succeed(&session, "plaindb_doctor", json!({"offline": true})).await;
+    assert_matches_schema("doctor", &reported);
+    let direct = cli(&store, &["doctor", "--offline"])["result"].clone();
+    assert_eq!(without_disk(reported), without_disk(direct));
+    session.cancel().await.expect("the server stops");
 }
