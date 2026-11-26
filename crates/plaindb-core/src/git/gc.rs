@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::push::{directory_bytes, run_git, truncated, try_lock_file};
+use super::command::run_git;
+use super::push::{directory_bytes, truncated, try_lock_file};
 use super::{git_disabled, read_optional, state_file};
 use crate::atomic::replace_unsynced;
-use crate::config::to_file_bytes;
+use crate::config::{StoreConfig, to_file_bytes};
 use crate::error::Result;
 use crate::store::{Store, read_config};
 use crate::write::now_timestamp;
@@ -106,7 +107,7 @@ fn finish(
     })
 }
 
-fn collect(root: &Path, auto: bool) -> Result<GcReport> {
+fn collect(root: &Path, config: &StoreConfig, auto: bool) -> Result<GcReport> {
     let git_dir = root.join(".git");
     let counted = read_count(root);
     let Some(lock) = try_lock_file(root, GC_LOCK_FILE)? else {
@@ -123,7 +124,7 @@ fn collect(root: &Path, auto: bool) -> Result<GcReport> {
     if auto {
         args.push("--auto");
     }
-    let report = match run_git(root, &args, GC_TIMEOUT) {
+    let report = match run_git(root, config, &args, GC_TIMEOUT) {
         Ok(run) if run.success => (GcOutcome::Done, None),
         Ok(run) if run.stderr.contains(ALREADY_RUNNING) => (GcOutcome::Busy, None),
         Ok(run) => (GcOutcome::Failed, Some(truncated(&run.stderr))),
@@ -140,10 +141,11 @@ fn collect(root: &Path, auto: bool) -> Result<GcReport> {
 
 impl Store {
     pub fn gc(&self) -> Result<GcReport> {
-        if !read_config(&self.root)?.git || !self.root.join(".git").exists() {
+        let config = read_config(&self.root)?;
+        if !config.git || !self.root.join(".git").exists() {
             return Err(git_disabled());
         }
-        collect(&self.root, false)
+        collect(&self.root, &config, false)
     }
 
     pub(crate) fn collect_if_due(&self) {
@@ -159,6 +161,6 @@ impl Store {
         if read_count(&self.root).saturating_sub(state.commits_at_last_gc) < config.gc_every {
             return;
         }
-        let _ = collect(&self.root, true);
+        let _ = collect(&self.root, &config, true);
     }
 }

@@ -33,7 +33,8 @@ pub use config::{
 };
 pub use error::{Error, ErrorCode, Result};
 pub use git::{
-    At, CommitId, DEFAULT_HISTORY_LIMIT, GcOutcome, GcReport, GitStatus, HistoryEntry, PushOutcome,
+    At, CommitId, DEFAULT_HISTORY_LIMIT, GIT_BINARY_ENV, GcOutcome, GcReport, GitStatus,
+    HistoryEntry, PushOutcome,
 };
 #[cfg(feature = "test-hooks")]
 pub use hooks::full_flush_count;

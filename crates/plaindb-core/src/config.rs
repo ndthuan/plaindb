@@ -62,6 +62,7 @@ pub struct StoreConfig {
     pub durability: Durability,
     pub checkpoint_interval: u64,
     pub gc_every: u64,
+    pub git_binary: Option<String>,
     pub limits: Limits,
 }
 
@@ -78,6 +79,7 @@ impl Default for StoreConfig {
             durability: Durability::Full,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
             gc_every: DEFAULT_GC_EVERY,
+            git_binary: None,
             limits: Limits::default(),
         }
     }

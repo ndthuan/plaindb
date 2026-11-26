@@ -1,12 +1,12 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::command::{rejected_as_behind, run_git};
 use super::{git_disabled, git_error, head_id, open, read_optional, state_file};
 use crate::atomic::{ensure_dir, replace_unsynced};
 use crate::config::Durability;
@@ -21,7 +21,6 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 const ATTEMPTS: u32 = 3;
 const FIRST_BACKOFF: Duration = Duration::from_secs(2);
 const ERROR_CHARS: usize = 500;
-const REJECTION_MARKERS: [&str; 3] = ["[rejected]", "non-fast-forward", "fetch first"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +29,7 @@ pub enum PushOutcome {
     Failed,
     RemoteAhead,
     Deferred,
+    GitNotFound,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,56 +63,11 @@ fn remote_ahead_error() -> Error {
 }
 
 fn git_not_found() -> Error {
-    Error::new(ErrorCode::GitNotFound, "git was not found on PATH")
+    Error::new(ErrorCode::GitNotFound, "the git binary was not found")
 }
 
 fn push_failed(message: &str) -> Error {
     Error::new(ErrorCode::Io, message).with_detail("reason", "push_failed")
-}
-
-pub(super) struct GitRun {
-    pub success: bool,
-    pub stderr: String,
-}
-
-pub(super) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<GitRun> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut pipe = child.stderr.take();
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(pipe) = pipe.as_mut() {
-            let _ = pipe.read_to_end(&mut bytes);
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let stderr = reader.join().unwrap_or_default();
-            return Ok(GitRun {
-                success: status.success(),
-                stderr,
-            });
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(GitRun {
-                success: false,
-                stderr: "the git command timed out".to_owned(),
-            });
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
 }
 
 enum Attempt {
@@ -125,13 +80,12 @@ enum Attempt {
 fn attempt(root: &Path, config: &StoreConfig) -> Attempt {
     match run_git(
         root,
-        &["push", &config.remote, &config.branch],
+        config,
+        &["push", "--porcelain", &config.remote, &config.branch],
         PUSH_TIMEOUT,
     ) {
         Ok(run) if run.success => Attempt::Pushed,
-        Ok(run) if REJECTION_MARKERS.iter().any(|m| run.stderr.contains(m)) => {
-            Attempt::Rejected(truncated(&run.stderr))
-        }
+        Ok(run) if rejected_as_behind(&run.stdout) => Attempt::Rejected(truncated(&run.stderr)),
         Ok(run) => Attempt::Failed(truncated(&run.stderr)),
         Err(source) if source.kind() == ErrorKind::NotFound => Attempt::Missing,
         Err(source) => Attempt::Failed(truncated(&source.to_string())),
@@ -294,6 +248,7 @@ impl Store {
         Some(match run(&self.root, &config) {
             Ok(outcome) => outcome,
             Err(error) if error.code == ErrorCode::RemoteAhead => PushOutcome::RemoteAhead,
+            Err(error) if error.code == ErrorCode::GitNotFound => PushOutcome::GitNotFound,
             Err(_) => PushOutcome::Failed,
         })
     }
@@ -322,6 +277,7 @@ impl Store {
         }
         let known = run_git(
             &self.root,
+            &config,
             &["remote", "get-url", "--", &config.remote],
             PUSH_TIMEOUT,
         )
@@ -332,6 +288,7 @@ impl Store {
         let verb = if known.success { "set-url" } else { "add" };
         let outcome = run_git(
             &self.root,
+            &config,
             &["remote", verb, "--", &config.remote, url],
             PUSH_TIMEOUT,
         )

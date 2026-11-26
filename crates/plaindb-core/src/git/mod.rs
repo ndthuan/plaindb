@@ -1,3 +1,4 @@
+mod command;
 mod commit;
 mod foreign;
 mod gc;
@@ -23,6 +24,7 @@ use crate::names::{new_id, validate_db_name};
 use crate::store::{DB_FILE, STATE_DIR, STORE_FILE, Store, read_config};
 use crate::write::{Op, OpResult};
 
+pub use command::GIT_BINARY_ENV;
 pub use gc::{GcOutcome, GcReport};
 pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
 pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
@@ -38,6 +40,7 @@ pub const GITIGNORE_LINE: &str = ".plaindb/";
 pub const LAST_COMMIT_FILE: &str = "last-commit";
 pub const WARNINGS_FILE: &str = "warnings.json";
 pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
+pub const GIT_NOT_FOUND_WARNING: &str = "git_not_found";
 const GIT_DIR: &str = ".git";
 const FALLBACK_NAME: &str = "plaindb";
 const FALLBACK_EMAIL: &str = "plaindb@localhost";
@@ -65,6 +68,9 @@ pub struct GitStatus {
     pub last_gc_at: Option<String>,
     pub last_gc_outcome: Option<String>,
     pub last_gc_error: Option<String>,
+    pub git_binary: String,
+    pub git_binary_source: String,
+    pub git_binary_found: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +490,8 @@ impl Store {
 
     pub(crate) fn git_status(&self) -> Result<GitStatus> {
         let config = read_config(&self.root)?;
+        let binary = command::resolve(&config);
+        let found = command::is_available(&binary);
         let mut status = GitStatus {
             enabled: config.git,
             commit: config.commit,
@@ -502,6 +510,9 @@ impl Store {
             last_gc_at: None,
             last_gc_outcome: None,
             last_gc_error: None,
+            git_binary: binary.program,
+            git_binary_source: binary.source.to_owned(),
+            git_binary_found: found,
         };
         if !config.git || !self.root.join(GIT_DIR).exists() {
             return Ok(status);

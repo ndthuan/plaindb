@@ -409,6 +409,21 @@ impl Store {
                 details,
             });
         }
+        if status.git.enabled
+            && status.git.push == crate::config::PushMode::OnCommit
+            && !status.git.git_binary_found
+        {
+            status.warnings.push(Warning {
+                code: git::GIT_NOT_FOUND_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.clone(),
+                details: serde_json::json!({
+                    "binary": status.git.git_binary,
+                    "source": status.git.git_binary_source,
+                }),
+            });
+        }
         for (db, db_snapshot) in snapshot.dbs.iter() {
             for (collection, collection_snapshot) in db_snapshot.collections.iter() {
                 for (name, entry) in collection_snapshot.files.iter() {
