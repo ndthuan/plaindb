@@ -1,5 +1,6 @@
 mod admin;
 pub mod atomic;
+pub mod cache;
 pub mod codec;
 pub mod config;
 pub mod error;

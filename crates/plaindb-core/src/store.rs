@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use serde_json::Value;
 
 use crate::atomic::{ensure_dir, write_atomic};
+use crate::cache;
 use crate::codec::Doc;
 use crate::config::{
     CollectionMeta, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
@@ -87,6 +88,30 @@ pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     Ok(config)
 }
 
+fn open_snapshot(root: &Path) -> Result<Snapshot> {
+    let (snapshot, unchanged) = match cache::load(root) {
+        Some(cached) => {
+            let current = scan::rescan(root, &cached)?;
+            let unchanged = cache::same_files(&cached, &current);
+            (current, unchanged)
+        }
+        None => (scan::full_scan(root)?, false),
+    };
+    if !unchanged && let Err(error) = cache::write(root, &snapshot) {
+        tracing::warn!("the index cache could not be written: {}", error.message);
+    }
+    Ok(snapshot)
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let snapshot = self.snapshot.load();
+        if cache::stored_generation(&self.root).is_none_or(|stored| snapshot.generation > stored) {
+            let _ = cache::write(&self.root, &snapshot);
+        }
+    }
+}
+
 impl Store {
     pub fn init(dir: impl AsRef<Path>) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
@@ -133,7 +158,7 @@ impl Store {
             journal::recover(&root)?;
             git::prepare_write(&root)?;
         }
-        let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
+        let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
         Ok(Self {
             root,
             config,
