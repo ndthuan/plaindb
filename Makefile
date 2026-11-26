@@ -13,5 +13,6 @@ soak:
 bench:
 	cargo run --release --locked --example git_size
 	cargo bench --locked -p plaindb-core --features testgen
-	cargo run --release --locked -p plaindb-core --features testgen --example rss
+	cargo run --release --locked -p plaindb-core --features testgen --example memory
+	cargo run --release --locked -p plaindb-core --features testgen --example heap
 	cargo run --release --locked -p plaindb-core --example bench_table -- target/criterion
