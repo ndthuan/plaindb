@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::codec::{Doc, codec_for};
 use crate::error::{Error, ErrorCode, Result};
-use crate::git;
+use crate::git::{self, PushOutcome};
 use crate::index::PendingWrite;
 use crate::journal::{self, JournalEntry};
 use crate::lock::WriteLock;
@@ -80,6 +80,8 @@ pub struct TxResult {
     #[serde(default)]
     pub generation: u64,
     pub results: Vec<OpResult>,
+    #[serde(skip)]
+    pub push: Option<PushOutcome>,
 }
 
 pub fn now_timestamp() -> String {
@@ -563,6 +565,13 @@ impl Store {
     }
 
     pub fn apply(&self, tx: Tx) -> Result<TxResult> {
+        let before = self.push_head();
+        let mut result = self.apply_locked(tx)?;
+        result.push = self.push_after(before);
+        Ok(result)
+    }
+
+    fn apply_locked(&self, tx: Tx) -> Result<TxResult> {
         let supplied = tx.id.is_some();
         let tx_id = match tx.id {
             Some(id) => {
@@ -599,6 +608,7 @@ impl Store {
                 tx_id,
                 generation: snapshot.generation,
                 results,
+                push: None,
             });
         }
         check_indexes(&snapshot, &targets)?;
@@ -608,6 +618,7 @@ impl Store {
             tx_id,
             generation,
             results,
+            push: None,
         };
         let entries = targets
             .iter()

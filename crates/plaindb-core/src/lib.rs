@@ -27,7 +27,7 @@ pub use config::{
     STORE_FORMAT, StoreConfig,
 };
 pub use error::{Error, ErrorCode, Result};
-pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry};
+pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry, PushOutcome};
 pub use jiff::Timestamp;
 pub use lock::WriteLock;
 pub use names::{new_id, validate_collection_name, validate_db_name, validate_id};

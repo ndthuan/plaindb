@@ -247,7 +247,9 @@ fn run_soak(store: &Store, count: u64, log_path: &str) -> Result<()> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: plaindb-test-writer <store> <insert|patch|tx|crash|soak> [count] [log]");
+        eprintln!(
+            "usage: plaindb-test-writer <store> <insert|patch|tx|crash|soak|push> [count] [log]"
+        );
         return ExitCode::from(2);
     }
     let count: u64 = args.get(3).and_then(|text| text.parse().ok()).unwrap_or(1);
@@ -256,6 +258,7 @@ fn main() -> ExitCode {
         "patch" => run_patches(&store, count),
         "tx" => run_transactions(&store, count),
         "crash" => run_crash(&store),
+        "push" => store.push().map(|outcome| println!("{outcome:?}")),
         "soak" => match args.get(4) {
             Some(log_path) => run_soak(&store, count, log_path),
             None => {

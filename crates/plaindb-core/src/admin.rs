@@ -53,6 +53,7 @@ impl Store {
 
     pub fn create_db(&self, db: &str) -> Result<()> {
         validate_db_name(db)?;
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         if self.root.join(db).join(DB_FILE).is_file() {
             return Err(already_exists("db", db));
@@ -68,6 +69,7 @@ impl Store {
     }
 
     pub fn drop_db(&self, db: &str) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         self.db_dir(db)?;
         self.commit_admin(
@@ -79,6 +81,7 @@ impl Store {
     pub fn create_collection(&self, db: &str, collection: &str, format: Format) -> Result<()> {
         validate_db_name(db)?;
         validate_collection_name(collection)?;
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let dir = self.db_dir(db)?.join(collection);
         if dir.join(META_FILE).is_file() {
@@ -93,6 +96,7 @@ impl Store {
     }
 
     pub fn drop_collection(&self, db: &str, collection: &str) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         self.collection_dir(db, collection)?;
         self.commit_admin(
@@ -102,6 +106,7 @@ impl Store {
     }
 
     pub fn set_schema(&self, db: &str, collection: &str, schema: Option<Value>) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let mut meta = self.collection_meta(db, collection)?;
         meta.schema = schema;
@@ -146,6 +151,7 @@ impl Store {
     }
 
     pub fn set_indexes(&self, db: &str, collection: &str, indexes: Vec<IndexSpec>) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let mut meta = self.collection_meta(db, collection)?;
         meta.indexes = indexes;

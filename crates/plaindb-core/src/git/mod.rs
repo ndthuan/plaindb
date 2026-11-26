@@ -3,6 +3,7 @@ mod foreign;
 mod history;
 mod message;
 mod pending;
+mod push;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::atomic::{TEMP_MARKER, remove_durable, replace_unsynced};
-use crate::config::{CommitMode, StoreConfig, to_file_bytes};
+use crate::config::{CommitMode, PushMode, StoreConfig, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::journal::{Journal, JournalEntry};
 use crate::names::{new_id, validate_db_name};
@@ -24,6 +25,7 @@ use crate::write::{Op, OpResult};
 pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
 pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
 pub use pending::PendingTx;
+pub use push::PushOutcome;
 
 pub(crate) use commit::commit_journal;
 pub(crate) use foreign::check_head;
@@ -50,6 +52,14 @@ pub struct GitStatus {
     pub head: Option<CommitId>,
     pub pending_txs: u64,
     pub pending_paths: u64,
+    pub push: PushMode,
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub unpushed: u64,
+    pub last_push_at: Option<String>,
+    pub last_push_error: Option<String>,
+    pub remote_ahead: bool,
+    pub git_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,11 +122,11 @@ pub(crate) fn signature(repo: &gix::Repository) -> gix::actor::Signature {
     }
 }
 
-fn state_file(root: &Path, name: &str) -> PathBuf {
+pub(super) fn state_file(root: &Path, name: &str) -> PathBuf {
     root.join(STATE_DIR).join(name)
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(source) if source.kind() == ErrorKind::NotFound => Ok(None),
@@ -372,6 +382,7 @@ impl Store {
     }
 
     fn turn_git_on(&self, subject: &str) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let mut config = read_config(&self.root)?;
         if config.git {
@@ -388,6 +399,7 @@ impl Store {
     }
 
     pub fn set_commit_mode(&self, mode: CommitMode) -> Result<()> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let mut config = read_config(&self.root)?;
         if config.commit == mode {
@@ -411,6 +423,7 @@ impl Store {
     }
 
     pub fn commit(&self, message: Option<&str>, actor: Option<&str>) -> Result<Option<CommitId>> {
+        let _push = self.push_guard();
         let _lock = self.begin_write()?;
         if !read_config(&self.root)?.git {
             return Err(git_disabled());
@@ -464,12 +477,29 @@ impl Store {
             head: None,
             pending_txs: 0,
             pending_paths: 0,
+            push: config.push,
+            remote: config.remote.clone(),
+            remote_url: None,
+            unpushed: 0,
+            last_push_at: None,
+            last_push_error: None,
+            remote_ahead: false,
+            git_bytes: 0,
         };
         if !config.git || !self.root.join(GIT_DIR).exists() {
             return Ok(status);
         }
         let repo = open(&self.root)?;
         status.head = head_id(&repo)?.map(|id| id.to_string());
+        status.remote_url = push::remote_url(&self.root, &config.remote)?;
+        if status.remote_url.is_some() {
+            status.unpushed = push::unpushed(&self.root, &config)?;
+        }
+        let state = push::read_state(&self.root)?;
+        status.last_push_at = state.last_push_at;
+        status.last_push_error = state.last_push_error;
+        status.remote_ahead = state.remote_ahead;
+        status.git_bytes = push::directory_bytes(&self.root.join(GIT_DIR));
         if config.commit == CommitMode::Manual {
             status.pending_txs =
                 u64::try_from(pending::read(&self.root)?.len()).unwrap_or(u64::MAX);
