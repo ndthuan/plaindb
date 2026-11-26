@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "push",
+  "type": "object",
+  "properties": {
+    "outcome": { "enum": ["ok", "failed", "remote_ahead", "deferred"] }
+  },
+  "required": ["outcome"],
+  "additionalProperties": false
+}

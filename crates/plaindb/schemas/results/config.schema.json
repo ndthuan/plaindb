@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "config",
+  "type": "object",
+  "properties": {
+    "key": { "type": ["string", "null"] },
+    "value": {}
+  },
+  "required": ["key", "value"],
+  "additionalProperties": false
+}

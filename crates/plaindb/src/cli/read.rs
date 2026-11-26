@@ -3,7 +3,8 @@ use std::path::Path;
 use clap::Args;
 use plaindb_core::codec::Doc;
 use plaindb_core::{
-    At, DEFAULT_HISTORY_LIMIT, Dir, Error, ErrorCode, Query, Result, Store, Timestamp, Version,
+    At, DEFAULT_HISTORY_LIMIT, Dir, Error, ErrorCode, InvalidFile, Query, Result, Store, Timestamp,
+    Version,
 };
 use serde_json::{Value, json};
 
@@ -209,11 +210,8 @@ fn relative(root: &Path, path: &Path) -> String {
         .into_owned()
 }
 
-pub fn status(store: &Store) -> Result<Output> {
-    let status = store.status()?;
-    let root = store.root();
-    let invalid: Vec<Value> = status
-        .invalid
+pub fn invalid_entries(root: &Path, files: &[InvalidFile]) -> Vec<Value> {
+    files
         .iter()
         .map(|file| {
             json!({
@@ -224,7 +222,13 @@ pub fn status(store: &Store) -> Result<Output> {
                 "reason": file.reason,
             })
         })
-        .collect();
+        .collect()
+}
+
+pub fn status(store: &Store) -> Result<Output> {
+    let status = store.status()?;
+    let root = store.root();
+    let invalid = invalid_entries(root, &status.invalid);
     let warnings: Vec<Value> = status
         .warnings
         .iter()

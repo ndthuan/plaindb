@@ -19,6 +19,7 @@ pub mod store;
 #[cfg(feature = "testgen")]
 pub mod testgen;
 pub mod text;
+pub mod transfer;
 pub mod txlog;
 pub mod version;
 pub mod write;

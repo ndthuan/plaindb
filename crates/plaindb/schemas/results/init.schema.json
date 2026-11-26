@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "init",
+  "type": "object",
+  "properties": {
+    "git": { "type": "boolean" },
+    "commit": { "enum": ["each", "manual"] },
+    "push": { "enum": ["off", "on-commit"] },
+    "remote": { "type": ["string", "null"] }
+  },
+  "required": ["git", "commit", "push", "remote"],
+  "additionalProperties": false
+}

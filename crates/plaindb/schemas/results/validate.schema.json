@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "validate",
+  "type": "object",
+  "properties": {
+    "valid": { "type": "boolean" },
+    "documents": { "type": "integer", "minimum": 0 },
+    "invalid": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "db": { "type": "string" },
+          "collection": { "type": "string" },
+          "id": { "type": "string" },
+          "path": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "required": ["db", "collection", "id", "path", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["valid", "documents", "invalid"],
+  "additionalProperties": false
+}

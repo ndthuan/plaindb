@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "collection, schema and index changes",
+  "type": "object",
+  "properties": {
+    "db": { "type": "string" },
+    "collection": { "type": "string" },
+    "format": { "enum": ["json", "yaml", "md"] },
+    "has_schema": { "type": "boolean" },
+    "indexes": { "type": "array" }
+  },
+  "required": ["db", "collection"],
+  "additionalProperties": false
+}

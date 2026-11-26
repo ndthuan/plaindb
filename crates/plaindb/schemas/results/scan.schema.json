@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rescan and reindex",
+  "type": "object",
+  "properties": {
+    "documents": { "type": "integer", "minimum": 0 },
+    "invalid_files": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["documents", "invalid_files"],
+  "additionalProperties": false
+}
