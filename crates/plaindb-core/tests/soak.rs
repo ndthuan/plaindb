@@ -1,6 +1,6 @@
 #![cfg(feature = "test-hooks")]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -207,6 +207,7 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
         })
         .collect();
     let mut settled: Vec<(Vec<String>, TxResult)> = Vec::new();
+    let mut settled_ids: HashSet<String> = HashSet::new();
     let mut edits: Vec<(u64, String, String, String)> = Vec::new();
     let mut kills = 0;
     let mut checkpoint_crashes = 0;
@@ -241,8 +242,10 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
             slot.child.wait().unwrap();
             kills += 1;
             if let Some((tx_id, collections)) = unfinished(&slot.log)
+                && !settled_ids.contains(&tx_id)
                 && let Some(result) = settle(&root, &tx_id)
             {
+                settled_ids.insert(tx_id);
                 settled.push((collections, result));
             }
             let remaining = TRANSACTIONS - begun(&slot.log);
@@ -259,8 +262,10 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
             } else if status.and_then(|status| status.code()) == Some(CRASH_STATUS) {
                 checkpoint_crashes += 1;
                 if let Some((tx_id, collections)) = unfinished(&slot.log)
+                    && !settled_ids.contains(&tx_id)
                     && let Some(result) = settle(&root, &tx_id)
                 {
+                    settled_ids.insert(tx_id);
                     settled.push((collections, result));
                 }
                 let remaining = TRANSACTIONS - begun(&slot.log);
