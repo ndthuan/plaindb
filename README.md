@@ -21,6 +21,12 @@ To restore, run `git clone <remote> <directory>` and open that directory as a st
 
 Nothing is pulled or merged automatically.
 
+### Keeping the repository small
+
+Every `"gc_every"` commits (default 200, `0` turns it off in `_store.json`) the store runs `git gc --auto` in its directory. Git packs the loose objects only when it holds more than its own threshold, so most runs do nothing. The run happens after the write lock is released and after any push, so it never delays a write by another process or a backup. Only one run is active at a time; a run that finds another one busy, including a `git gc` started by a person, leaves it alone and is reported as busy.
+
+A failed run never fails a write. The status reports the time, outcome and error of the last run, and an explicit run packs everything now and reports the size of `.git` before and after.
+
 ## Durability
 
 `"durability"` in `_store.json` sets how far a write is flushed before it returns:
@@ -37,14 +43,15 @@ Opening a store finishes any transaction whose files were not all written. After
 
 ## Performance
 
-Git history size after 10,000 single-document transactions: each transaction rewrites one of 1,000 documents of about 270 bytes in a JSON collection. Measured with `make bench` on an Apple M2 Pro.
+Git history size after 10,000 single-document transactions: each transaction rewrites one of 1,000 documents of about 270 bytes in a JSON collection. Measured with `make bench` on an Apple M2 Pro, with the default `gc_every`.
 
 | Commit mode | `.git` size | After `git gc --aggressive` | Time |
 |---|---|---|---|
-| One commit per transaction | 247 MiB | 9.9 MiB | 233 s |
-| One commit per 100 transactions | 4.9 MiB | 1.4 MiB | 178 s |
+| One commit per transaction | 13.0 MiB | 10.0 MiB | 157 s |
+| One commit per transaction, housekeeping off (`"gc_every": 0`) | 247 MiB | 9.9 MiB | 152 s |
+| One commit per 100 transactions | 4.9 MiB | 1.5 MiB | 74 s |
 
-The large size of the first row is loose objects: each commit rewrites the collection's tree, which lists every document. Manual mode, or a periodic `git gc`, keeps the repository small.
+Each commit rewrites the collection's tree, which lists every document, and leaves it as a loose object. The store therefore packs its repository by itself, as described under Backup and restore, and the second row shows what the repository would grow to without it.
 
 Licensed under AGPL-3.0-only. See `LICENSE`.
 

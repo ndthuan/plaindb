@@ -571,6 +571,7 @@ impl Store {
         let before = self.push_head();
         let mut result = self.apply_locked(tx)?;
         result.push = self.push_after(before);
+        self.collect_if_due();
         Ok(result)
     }
 

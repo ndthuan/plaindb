@@ -51,7 +51,7 @@ fn write_state(root: &Path, state: &PushState) -> Result<()> {
     replace_unsynced(&state_file(root, PUSH_STATE_FILE), &to_file_bytes(state))
 }
 
-fn truncated(text: &str) -> String {
+pub(super) fn truncated(text: &str) -> String {
     text.trim().chars().take(ERROR_CHARS).collect()
 }
 
@@ -70,17 +70,18 @@ fn push_failed(message: &str) -> Error {
     Error::new(ErrorCode::Io, message).with_detail("reason", "push_failed")
 }
 
-struct GitRun {
-    success: bool,
-    stderr: String,
+pub(super) struct GitRun {
+    pub success: bool,
+    pub stderr: String,
 }
 
-fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<GitRun> {
+pub(super) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<GitRun> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -107,7 +108,7 @@ fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<Git
             let _ = child.wait();
             return Ok(GitRun {
                 success: false,
-                stderr: "the push timed out".to_owned(),
+                stderr: "the git command timed out".to_owned(),
             });
         }
         thread::sleep(Duration::from_millis(20));
@@ -171,14 +172,14 @@ fn push_with_retries(root: &Path, config: &StoreConfig) -> Result<()> {
     Err(push_failed(&failure))
 }
 
-fn try_lock(root: &Path) -> Result<Option<File>> {
+pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<File>> {
     let dir = root.join(STATE_DIR);
     ensure_dir(&dir, Durability::Full)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join(PUSH_LOCK_FILE))?;
+        .open(dir.join(name))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
@@ -212,7 +213,7 @@ fn run(root: &Path, config: &StoreConfig) -> Result<PushOutcome> {
     }
     let mut pushed_any = false;
     loop {
-        let Some(lock) = try_lock(root)? else {
+        let Some(lock) = try_lock_file(root, PUSH_LOCK_FILE)? else {
             return Ok(if pushed_any {
                 PushOutcome::Ok
             } else {
@@ -369,5 +370,6 @@ pub(crate) struct PushGuard<'a> {
 impl Drop for PushGuard<'_> {
     fn drop(&mut self) {
         let _ = self.store.push_after(self.before.take());
+        self.store.collect_if_due();
     }
 }

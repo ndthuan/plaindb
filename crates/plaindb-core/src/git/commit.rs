@@ -154,7 +154,11 @@ pub(crate) fn commit_changes(
     };
     let id = match already {
         Some(id) => id,
-        None => write_commit(&repo, head, changes, message)?,
+        None => {
+            let id = write_commit(&repo, head, changes, message)?;
+            super::gc::count_commit(root);
+            id
+        }
     };
     crate::hooks::after_git_commit();
     update_index(&repo, root, changes)?;

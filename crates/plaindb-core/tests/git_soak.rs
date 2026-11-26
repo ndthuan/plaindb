@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use plaindb_core::{Format, PushMode, Store, WriteLock};
+use plaindb_core::{Format, PushMode, Store, StoreConfig, WriteLock};
 use serde_json::Value;
 
 const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
@@ -153,7 +153,15 @@ fn three_writers_through_a_crash_a_foreign_commit_and_a_remote_that_got_ahead() 
         .collect();
     let crash_log = logs_dir.join("crash.jsonl");
 
-    let store = Store::init_with_git(&root).unwrap();
+    let store = Store::init_with(
+        &root,
+        StoreConfig {
+            git: true,
+            gc_every: 10,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     for (collection, format) in COLLECTIONS {
         store.create_collection("main", collection, format).unwrap();

@@ -248,7 +248,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: plaindb-test-writer <store> <insert|patch|tx|crash|open|soak|push> [count] [log]"
+            "usage: plaindb-test-writer <store> <insert|patch|tx|crash|open|soak|push|gc> [count] [log]"
         );
         return ExitCode::from(2);
     }
@@ -260,6 +260,7 @@ fn main() -> ExitCode {
         "crash" => run_crash(&store),
         "open" => Ok(()),
         "push" => store.push().map(|outcome| println!("{outcome:?}")),
+        "gc" => store.gc().map(|report| println!("{:?}", report.outcome)),
         "soak" => match args.get(4) {
             Some(log_path) => run_soak(&store, count, log_path),
             None => {

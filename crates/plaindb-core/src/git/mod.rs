@@ -1,5 +1,6 @@
 mod commit;
 mod foreign;
+mod gc;
 mod history;
 mod message;
 mod pending;
@@ -22,6 +23,7 @@ use crate::names::{new_id, validate_db_name};
 use crate::store::{DB_FILE, STATE_DIR, STORE_FILE, Store, read_config};
 use crate::write::{Op, OpResult};
 
+pub use gc::{GcOutcome, GcReport};
 pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
 pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
 pub use pending::PendingTx;
@@ -60,6 +62,9 @@ pub struct GitStatus {
     pub last_push_error: Option<String>,
     pub remote_ahead: bool,
     pub git_bytes: u64,
+    pub last_gc_at: Option<String>,
+    pub last_gc_outcome: Option<String>,
+    pub last_gc_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +499,9 @@ impl Store {
             last_push_error: None,
             remote_ahead: false,
             git_bytes: 0,
+            last_gc_at: None,
+            last_gc_outcome: None,
+            last_gc_error: None,
         };
         if !config.git || !self.root.join(GIT_DIR).exists() {
             return Ok(status);
@@ -508,6 +516,10 @@ impl Store {
         status.last_push_at = state.last_push_at;
         status.last_push_error = state.last_push_error;
         status.remote_ahead = state.remote_ahead;
+        let gc_state = gc::read_state(&self.root)?;
+        status.last_gc_at = gc_state.last_gc_at;
+        status.last_gc_outcome = gc_state.last_gc_outcome;
+        status.last_gc_error = gc_state.last_gc_error;
         status.git_bytes = push::directory_bytes(&self.root.join(GIT_DIR));
         if config.commit == CommitMode::Manual {
             status.pending_txs =

@@ -26,11 +26,14 @@ pub mod write;
 pub use atomic::{remove_durable, write_atomic};
 pub use codec::{Codec, Doc, codec_for};
 pub use config::{
-    CollectionMeta, CommitMode, DEFAULT_CHECKPOINT_INTERVAL, DEFAULT_LOCK_TIMEOUT_MS, Durability,
-    Format, IndexSpec, Limits, PushMode, STORE_FORMAT, StoreConfig,
+    CollectionMeta, CommitMode, DEFAULT_CHECKPOINT_INTERVAL, DEFAULT_GC_EVERY,
+    DEFAULT_LOCK_TIMEOUT_MS, Durability, Format, IndexSpec, Limits, PushMode, STORE_FORMAT,
+    StoreConfig,
 };
 pub use error::{Error, ErrorCode, Result};
-pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry, PushOutcome};
+pub use git::{
+    At, CommitId, DEFAULT_HISTORY_LIMIT, GcOutcome, GcReport, GitStatus, HistoryEntry, PushOutcome,
+};
 #[cfg(feature = "test-hooks")]
 pub use hooks::full_flush_count;
 pub use jiff::Timestamp;
