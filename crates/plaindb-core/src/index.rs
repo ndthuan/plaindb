@@ -5,11 +5,12 @@ use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
 use serde_json::Value;
 
 use crate::codec::Doc;
-use crate::config::{CollectionMeta, IndexSpec};
+use crate::config::{CollectionMeta, Format, IndexSpec};
 use crate::error::{Error, ErrorCode, Result};
 use crate::query::{Key, split_path};
 use crate::query::{crosses_array, elements, terminals};
 use crate::snapshot::{CollectionSnapshot, FileEntry, Outcome};
+use crate::text::{TextFields, doc_tokens, tokens};
 
 pub type PendingWrite<'a> = (&'a str, Option<&'a Doc>);
 pub type IdSet = RedBlackTreeSetSync<String>;
@@ -136,9 +137,60 @@ impl FieldIndex {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TextIndex {
+    pub fields: TextFields,
+    entries: RedBlackTreeMapSync<String, IdSet>,
+}
+
+impl TextIndex {
+    fn add(&mut self, id: &str, doc: &Doc) {
+        for token in doc_tokens(doc, &self.fields) {
+            let mut ids = self
+                .entries
+                .get(&token)
+                .cloned()
+                .unwrap_or_else(IdSet::new_sync);
+            ids.insert_mut(id.to_owned());
+            self.entries.insert_mut(token, ids);
+        }
+    }
+
+    fn remove(&mut self, id: &str, doc: &Doc) {
+        for token in doc_tokens(doc, &self.fields) {
+            let Some(mut ids) = self.entries.get(&token).cloned() else {
+                continue;
+            };
+            ids.remove_mut(id);
+            if ids.is_empty() {
+                self.entries.remove_mut(&token);
+            } else {
+                self.entries.insert_mut(token, ids);
+            }
+        }
+    }
+
+    pub fn matching(&self, query: &str) -> Vec<String> {
+        let mut found: Option<BTreeSet<String>> = None;
+        for token in tokens(query) {
+            let ids: BTreeSet<String> = self
+                .entries
+                .get(&token)
+                .map(|ids| ids.iter().cloned().collect())
+                .unwrap_or_default();
+            found = Some(match found {
+                Some(known) => known.intersection(&ids).cloned().collect(),
+                None => ids,
+            });
+        }
+        found.unwrap_or_default().into_iter().collect()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Indexes {
     pub fields: Vec<FieldIndex>,
+    pub text: Option<TextIndex>,
 }
 
 fn invalid_index(field: &str) -> Error {
@@ -183,17 +235,34 @@ fn doc_of(entry: &FileEntry) -> Option<&Doc> {
 impl Indexes {
     pub fn empty(meta: &CollectionMeta) -> Result<Self> {
         let mut fields = Vec::new();
+        let mut text = None;
         for spec in &meta.indexes {
-            if let IndexSpec::Field {
-                field,
-                unique,
-                multi,
-            } = spec
-            {
-                fields.push(FieldIndex::new(field, *unique, *multi)?);
+            match spec {
+                IndexSpec::Field {
+                    field,
+                    unique,
+                    multi,
+                } => fields.push(FieldIndex::new(field, *unique, *multi)?),
+                IndexSpec::Text { text: paths } => {
+                    if text.is_some() || paths.is_empty() {
+                        return Err(invalid_index("text"));
+                    }
+                    let named = paths
+                        .iter()
+                        .map(|path| split_path(path).map_err(|_| invalid_index(path)))
+                        .collect::<Result<Vec<_>>>()?;
+                    text = Some(TextFields::Named(named));
+                }
             }
         }
-        Ok(Self { fields })
+        if text.is_none() && meta.format == Format::Md {
+            text = Some(TextFields::All);
+        }
+        let text = text.map(|fields| TextIndex {
+            fields,
+            entries: RedBlackTreeMapSync::new_sync(),
+        });
+        Ok(Self { fields, text })
     }
 
     pub fn build<'a>(
@@ -209,6 +278,18 @@ impl Indexes {
 
     pub fn apply(&mut self, old: Option<&FileEntry>, new: Option<&FileEntry>) {
         for index in &mut self.fields {
+            if let Some(old) = old
+                && let Some(doc) = doc_of(old)
+            {
+                index.remove(&old.id, doc);
+            }
+            if let Some(new) = new
+                && let Some(doc) = doc_of(new)
+            {
+                index.add(&new.id, doc);
+            }
+        }
+        if let Some(index) = &mut self.text {
             if let Some(old) = old
                 && let Some(doc) = doc_of(old)
             {

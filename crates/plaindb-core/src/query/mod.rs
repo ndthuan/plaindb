@@ -49,11 +49,19 @@ fn matched<'a>(
     filter: &Filter,
     limits: &Limits,
 ) -> Result<Vec<&'a DocEntry>> {
+    let text = collection.indexes.text.as_ref().map(|index| &index.fields);
+    if filter.has_text() && text.is_none() {
+        return Err(Error::new(
+            ErrorCode::InvalidQuery,
+            "text search needs a text index: declare a text index on this collection",
+        )
+        .with_detail("reason", "no_text_index"));
+    }
     if let Some(ids) = plan::candidates(collection, filter) {
         return Ok(ids
             .iter()
             .filter_map(|id| collection.readable(id))
-            .filter(|entry| filter.matches(&entry.doc))
+            .filter(|entry| filter.matches(&entry.doc, text))
             .collect());
     }
     let started = Instant::now();
@@ -71,7 +79,7 @@ fn matched<'a>(
             .with_detail("limit", "max_scan_ms")
             .with_detail("max", limits.max_scan_ms));
         }
-        if filter.matches(&entry.doc) {
+        if filter.matches(&entry.doc, text) {
             found.push(entry);
         }
     }

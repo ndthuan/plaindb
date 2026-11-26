@@ -13,6 +13,7 @@ pub mod query;
 pub mod scan;
 pub mod snapshot;
 pub mod store;
+pub mod text;
 pub mod txlog;
 pub mod version;
 pub mod write;

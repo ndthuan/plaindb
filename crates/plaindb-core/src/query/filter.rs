@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::order::compare;
 use crate::error::{Error, ErrorCode, Result};
+use crate::text::{TextFields, doc_tokens, tokens};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cond {
@@ -21,6 +22,7 @@ pub enum Filter {
     And(Vec<Filter>),
     Or(Vec<Filter>),
     Field { path: Vec<String>, cond: Cond },
+    Text(String),
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -54,11 +56,23 @@ impl Filter {
         }
     }
 
-    pub fn matches(&self, doc: &serde_json::Map<String, Value>) -> bool {
+    pub fn has_text(&self) -> bool {
         match self {
-            Self::And(parts) => parts.iter().all(|part| part.matches(doc)),
-            Self::Or(parts) => parts.iter().any(|part| part.matches(doc)),
+            Self::And(parts) | Self::Or(parts) => parts.iter().any(Self::has_text),
+            Self::Field { .. } => false,
+            Self::Text(_) => true,
+        }
+    }
+
+    pub fn matches(&self, doc: &serde_json::Map<String, Value>, text: Option<&TextFields>) -> bool {
+        match self {
+            Self::And(parts) => parts.iter().all(|part| part.matches(doc, text)),
+            Self::Or(parts) => parts.iter().any(|part| part.matches(doc, text)),
             Self::Field { path, cond } => cond.matches(doc, path),
+            Self::Text(query) => text.is_some_and(|fields| {
+                let present = doc_tokens(doc, fields);
+                tokens(query).iter().all(|token| present.contains(token))
+            }),
         }
     }
 }
@@ -77,7 +91,10 @@ fn parse_entry(key: &str, value: &Value) -> Result<Filter> {
     match key {
         "$and" => Ok(Filter::And(parse_list(key, value)?)),
         "$or" => Ok(Filter::Or(parse_list(key, value)?)),
-        "$text" => Err(invalid("text search needs a text index")),
+        "$text" => match value {
+            Value::String(query) if !tokens(query).is_empty() => Ok(Filter::Text(query.clone())),
+            _ => Err(invalid("$text needs a string with at least one word")),
+        },
         _ if key.starts_with('$') => Err(unknown_operator(key)),
         _ => parse_field(key, value),
     }
