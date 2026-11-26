@@ -68,11 +68,15 @@ impl Tx {
 pub struct OpResult {
     pub id: String,
     pub version: Option<String>,
+    #[serde(default)]
+    pub previous_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxResult {
     pub tx_id: String,
+    #[serde(default)]
+    pub generation: u64,
     pub results: Vec<OpResult>,
 }
 
@@ -91,6 +95,15 @@ enum Current {
     Missing,
     Present { doc: Arc<Doc>, version: String },
     Refused(String),
+}
+
+impl Current {
+    fn version(&self) -> Option<String> {
+        match self {
+            Self::Present { version, .. } => Some(version.clone()),
+            Self::Missing | Self::Refused(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +425,7 @@ impl<'a> Planner<'a> {
                 Ok(OpResult {
                     id,
                     version: Some(version),
+                    previous_version: None,
                 })
             }
             Op::Put {
@@ -442,6 +456,7 @@ impl<'a> Planner<'a> {
                 Ok(OpResult {
                     id: id.clone(),
                     version: Some(version),
+                    previous_version: current.version(),
                 })
             }
             Op::Patch {
@@ -475,6 +490,7 @@ impl<'a> Planner<'a> {
                 Ok(OpResult {
                     id: id.clone(),
                     version: Some(version),
+                    previous_version: current.version(),
                 })
             }
             Op::Delete {
@@ -495,6 +511,7 @@ impl<'a> Planner<'a> {
                 Ok(OpResult {
                     id: id.clone(),
                     version: None,
+                    previous_version: current.version(),
                 })
             }
         }
@@ -553,12 +570,20 @@ impl Store {
             results.push(result);
         }
         let targets: Vec<Target> = planner.targets.into_values().collect();
-        let result = TxResult { tx_id, results };
         if targets.is_empty() {
-            return Ok(result);
+            return Ok(TxResult {
+                tx_id,
+                generation: snapshot.generation,
+                results,
+            });
         }
         self.check_disk(&snapshot, &targets)?;
         let generation = snapshot.generation + 1;
+        let result = TxResult {
+            tx_id,
+            generation,
+            results,
+        };
         let entries = targets
             .iter()
             .map(|target| match &target.next {

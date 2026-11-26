@@ -156,7 +156,8 @@ fn every_write_bumps_the_generation() {
     let store = store_with_users(temp.path());
     let before = read_generation(temp.path()).unwrap();
     one(&store, insert("users", "ann", json!({}))).unwrap();
-    one(&store, insert("users", "bob", json!({}))).unwrap();
+    let second = one(&store, insert("users", "bob", json!({}))).unwrap();
+    assert_eq!(second.generation, before + 2);
     assert_eq!(read_generation(temp.path()).unwrap(), before + 2);
     assert_eq!(store.snapshot().generation, before + 2);
     assert!(!temp.path().join(".plaindb").join("journal.json").exists());
@@ -171,8 +172,9 @@ fn put_keeps_the_creation_time_and_replaces_the_fields() {
         insert("users", "ann", json!({"name": "Ann", "age": 3})),
     )
     .unwrap();
-    let (first, _) = store.get("main", "users", "ann").unwrap().unwrap();
-    one(&store, put("users", "ann", json!({"name": "Anna"}), None)).unwrap();
+    let (first, first_version) = store.get("main", "users", "ann").unwrap().unwrap();
+    let replaced = one(&store, put("users", "ann", json!({"name": "Anna"}), None)).unwrap();
+    assert_eq!(replaced.results[0].previous_version, Some(first_version));
     let (second, _) = store.get("main", "users", "ann").unwrap().unwrap();
     assert_eq!(second["name"], json!("Anna"));
     assert!(second.get("age").is_none());
