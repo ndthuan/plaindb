@@ -47,3 +47,19 @@ Git history size after 10,000 single-document transactions: each transaction rew
 The large size of the first row is loose objects: each commit rewrites the collection's tree, which lists every document. Manual mode, or a periodic `git gc`, keeps the repository small.
 
 Licensed under AGPL-3.0-only. See `LICENSE`.
+
+## Performance
+
+Measured with `make bench` on an Apple M2 Pro, 2026-11-26. Each store holds 10,000 generated documents of 1 to 4 KB with 10 fields, declared indexes on `email` (unique), `age`, `status`, `address.city`, `tags` and a text index. Times are means.
+
+| Measurement | JSON | YAML | Markdown |
+| --- | --- | --- | --- |
+| Open, cold (no index cache; scans every file and writes the cache) | 1.07 s | 1.23 s | 1.33 s |
+| Open, warm (index cache present) | 437 ms | 437 ms | 477 ms |
+| `find` on an indexed field, equality | 14 us | 14 us | 14 us |
+| `find` on the same field with no index | 1.4 ms | 1.4 ms | 0.65 ms |
+| `count` over an indexed range | 3.3 ms | 3.3 ms | 3.3 ms |
+| `$text` search | n/a | n/a | 1.6 ms |
+| Peak resident memory after open and one query | 230 MB | 230 MB | 251 MB |
+
+The warm open loads the cache and then stats every file to pick up hand edits. The cache is written without syncing and no measurement writes a document, so the durability setting does not change these numbers. Peak memory is the resident set of a fresh process that opens the store and runs one query.

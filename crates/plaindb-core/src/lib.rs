@@ -16,6 +16,8 @@ pub mod query;
 pub mod scan;
 pub mod snapshot;
 pub mod store;
+#[cfg(feature = "testgen")]
+pub mod testgen;
 pub mod text;
 pub mod txlog;
 pub mod version;

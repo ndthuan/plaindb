@@ -57,11 +57,13 @@ fn matched<'a>(
         )
         .with_detail("reason", "no_text_index"));
     }
-    if let Some(ids) = plan::candidates(collection, filter) {
-        return Ok(ids
+    if let Some(found) = plan::candidates(collection, filter) {
+        let verify = found.residual.as_ref().unwrap_or(filter);
+        return Ok(found
+            .ids
             .iter()
             .filter_map(|id| collection.readable(id))
-            .filter(|entry| filter.matches(&entry.doc, text))
+            .filter(|entry| verify.matches(&entry.doc, text))
             .collect());
     }
     let started = Instant::now();

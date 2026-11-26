@@ -32,10 +32,32 @@ unicode-segmentation = "1.13.3"
 libc = "0.2.191"
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 fastrand = "2.5.0"
+libc = "0.2.191"
 proptest = "1.12.0"
 tempfile = "3.27.0"
 
 [[bin]]
 name = "plaindb-test-writer"
 required-features = ["test-hooks"]
+
+[[test]]
+name = "testgen"
+required-features = ["testgen"]
+
+[[test]]
+name = "query_oracle"
+required-features = ["testgen"]
+
+[[example]]
+name = "rss"
+required-features = ["testgen"]
+
+[[example]]
+name = "bench_table"
+
+[[bench]]
+name = "open_query"
+harness = false
+required-features = ["testgen"]

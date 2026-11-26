@@ -33,17 +33,42 @@ fn lookup(collection: &CollectionSnapshot, path: &[String], cond: &Cond) -> Opti
     Some(ids)
 }
 
-pub(crate) fn candidates(collection: &CollectionSnapshot, filter: &Filter) -> Option<Vec<String>> {
+pub(crate) struct Candidates {
+    pub ids: Vec<String>,
+    pub residual: Option<Filter>,
+}
+
+pub(crate) fn candidates(collection: &CollectionSnapshot, filter: &Filter) -> Option<Candidates> {
     let mut parts = Vec::new();
     conjuncts(filter, &mut parts);
-    parts
-        .into_iter()
-        .find_map(|part| match part {
-            Filter::Field { path, cond } => lookup(collection, path, cond),
-            _ => None,
-        })
-        .map(|ids| {
-            let unique: BTreeSet<String> = ids.into_iter().collect();
-            unique.into_iter().collect()
-        })
+    let (position, ids, exact) =
+        parts
+            .iter()
+            .enumerate()
+            .find_map(|(position, part)| match part {
+                Filter::Field { path, cond } => {
+                    lookup(collection, path, cond).map(|ids| (position, ids, false))
+                }
+                Filter::Text(query) => collection
+                    .indexes
+                    .text
+                    .as_ref()
+                    .map(|index| (position, index.matching(query), true)),
+                _ => None,
+            })?;
+    let unique: BTreeSet<String> = ids.into_iter().collect();
+    let residual = exact.then(|| {
+        Filter::And(
+            parts
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != position)
+                .map(|(_, part)| (*part).clone())
+                .collect(),
+        )
+    });
+    Some(Candidates {
+        ids: unique.into_iter().collect(),
+        residual,
+    })
 }

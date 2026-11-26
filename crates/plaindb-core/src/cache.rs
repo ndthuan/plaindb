@@ -8,11 +8,11 @@ use rpds::RedBlackTreeMapSync;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use crate::atomic::write_atomic;
+use crate::atomic::write_atomic_at;
 use crate::codec::Doc;
-use crate::config::{CollectionMeta, from_file_bytes};
+use crate::config::{CollectionMeta, Durability, from_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
-use crate::index::Indexes;
+use crate::index::{IndexDump, Indexes};
 use crate::names::{validate_collection_name, validate_db_name};
 use crate::scan::find_case_duplicates;
 use crate::snapshot::{
@@ -40,6 +40,7 @@ struct CollectionRef<'a> {
     db: &'a str,
     collection: &'a str,
     files: Vec<FileRef<'a>>,
+    indexes: IndexDump,
 }
 
 #[derive(Serialize)]
@@ -75,6 +76,7 @@ struct CollectionOwned {
     db: String,
     collection: String,
     files: Vec<FileOwned>,
+    indexes: IndexDump,
 }
 
 #[derive(Deserialize)]
@@ -176,20 +178,30 @@ fn reject(root: &Path) {
 }
 
 fn assemble(root: &Path, generation: u64, body: Body, metas: Vec<DiskMeta>) -> Option<Snapshot> {
-    let mut cached: HashMap<(String, String), Vec<FileOwned>> = body
+    let mut cached: HashMap<(String, String), (Vec<FileOwned>, IndexDump)> = body
         .collections
         .into_iter()
-        .map(|entry| ((entry.db, entry.collection), entry.files))
+        .map(|entry| ((entry.db, entry.collection), (entry.files, entry.indexes)))
         .collect();
     let mut dbs: RedBlackTreeMapSync<String, DbSnapshot> = RedBlackTreeMapSync::new_sync();
     for disk in metas {
         let dir = root.join(&disk.db).join(&disk.collection);
         let mut files = RedBlackTreeMapSync::new_sync();
         let key = (disk.db.clone(), disk.collection.clone());
-        for file in cached.remove(&key).unwrap_or_default() {
-            files.insert_mut(file.name.clone(), file_entry(file, &dir));
+        let mut ids = Vec::new();
+        let mut dump = None;
+        if let Some((cached_files, cached_dump)) = cached.remove(&key) {
+            ids = cached_files.iter().map(|file| file.id.clone()).collect();
+            for file in cached_files {
+                files.insert_mut(file.name.clone(), file_entry(file, &dir));
+            }
+            dump = Some(cached_dump);
         }
-        let indexes = Indexes::build(&disk.meta, files.values()).ok()?;
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let indexes = match dump {
+            Some(dump) => Indexes::restore(&disk.meta, dump, &id_refs)?,
+            None => Indexes::build(&disk.meta, files.values()).ok()?,
+        };
         let case_duplicates = find_case_duplicates(&files);
         let mut db_snapshot = dbs.get(&disk.db).cloned().unwrap_or_default();
         db_snapshot.collections.insert_mut(
@@ -274,6 +286,12 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
         if collection.meta != disk.meta {
             return Ok(());
         }
+        let lookup: HashMap<&str, u32> = collection
+            .files
+            .values()
+            .zip(0..)
+            .map(|(entry, ordinal)| (entry.id.as_str(), ordinal))
+            .collect();
         collections.push(CollectionRef {
             db: &disk.db,
             collection: &disk.collection,
@@ -282,6 +300,7 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
                 .iter()
                 .map(|(name, entry)| file_ref(name, entry))
                 .collect(),
+            indexes: collection.indexes.dump(&lookup),
         });
     }
     let header = Header {
@@ -291,7 +310,7 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
     };
     let mut bytes = encode(&header)?;
     bytes.extend(encode(&BodyRef { collections })?);
-    write_atomic(&cache_path(root), &bytes)
+    write_atomic_at(&cache_path(root), &bytes, Durability::Off)
 }
 
 pub fn same_files(left: &Snapshot, right: &Snapshot) -> bool {

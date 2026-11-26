@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 
 use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::codec::Doc;
@@ -14,6 +15,41 @@ use crate::text::{TextFields, doc_tokens, tokens};
 
 pub type PendingWrite<'a> = (&'a str, Option<&'a Doc>);
 pub type IdSet = RedBlackTreeSetSync<String>;
+
+#[derive(Serialize, Deserialize)]
+pub struct FieldDump {
+    pub entries: Vec<(Value, Vec<u32>)>,
+    pub unindexed: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct IndexDump {
+    pub fields: Vec<FieldDump>,
+    pub text: Option<Vec<(String, Vec<u32>)>>,
+}
+
+fn ordinals(set: &IdSet, lookup: &HashMap<&str, u32>) -> Vec<u32> {
+    set.iter()
+        .filter_map(|id| lookup.get(id.as_str()).copied())
+        .collect()
+}
+
+fn restored_set(ordinals: &[u32], ids: &[&str]) -> Option<IdSet> {
+    let mut set = IdSet::new_sync();
+    for ordinal in ordinals {
+        let id = ids.get(usize::try_from(*ordinal).ok()?)?;
+        set.insert_mut((*id).to_owned());
+    }
+    Some(set)
+}
+
+fn id_set(ids: &[&str]) -> IdSet {
+    let mut set = IdSet::new_sync();
+    for id in ids {
+        set.insert_mut((*id).to_owned());
+    }
+    set
+}
 
 #[derive(Debug, Clone)]
 pub struct FieldIndex {
@@ -67,6 +103,23 @@ impl FieldIndex {
                     self.entries.insert_mut(Key(key), ids);
                 }
             }
+        }
+    }
+
+    fn bulk(&mut self, docs: &[(&str, &Doc)]) {
+        let mut grouped: BTreeMap<Key, Vec<&str>> = BTreeMap::new();
+        for (id, doc) in docs {
+            match self.keys_for(doc) {
+                Keys::Refused => self.unindexed.insert_mut((*id).to_owned()),
+                Keys::Some(keys) => {
+                    for key in keys {
+                        grouped.entry(Key(key)).or_default().push(id);
+                    }
+                }
+            }
+        }
+        for (key, ids) in grouped {
+            self.entries.insert_mut(key, id_set(&ids));
         }
     }
 
@@ -156,6 +209,18 @@ impl TextIndex {
         }
     }
 
+    fn bulk(&mut self, docs: &[(&str, &Doc)]) {
+        let mut grouped: HashMap<String, Vec<&str>> = HashMap::new();
+        for (id, doc) in docs {
+            for token in doc_tokens(doc, &self.fields) {
+                grouped.entry(token).or_default().push(id);
+            }
+        }
+        for (token, ids) in grouped {
+            self.entries.insert_mut(token, id_set(&ids));
+        }
+    }
+
     fn remove(&mut self, id: &str, doc: &Doc) {
         for token in doc_tokens(doc, &self.fields) {
             let Some(mut ids) = self.entries.get(&token).cloned() else {
@@ -233,6 +298,55 @@ fn doc_of(entry: &FileEntry) -> Option<&Doc> {
 }
 
 impl Indexes {
+    pub fn dump(&self, lookup: &HashMap<&str, u32>) -> IndexDump {
+        IndexDump {
+            fields: self
+                .fields
+                .iter()
+                .map(|index| FieldDump {
+                    entries: index
+                        .entries
+                        .iter()
+                        .map(|(key, ids)| (key.0.clone(), ordinals(ids, lookup)))
+                        .collect(),
+                    unindexed: ordinals(&index.unindexed, lookup),
+                })
+                .collect(),
+            text: self.text.as_ref().map(|index| {
+                index
+                    .entries
+                    .iter()
+                    .map(|(token, ids)| (token.clone(), ordinals(ids, lookup)))
+                    .collect()
+            }),
+        }
+    }
+
+    pub fn restore(meta: &CollectionMeta, dump: IndexDump, ids: &[&str]) -> Option<Self> {
+        let mut indexes = Self::empty(meta).ok()?;
+        if indexes.fields.len() != dump.fields.len()
+            || indexes.text.is_some() != dump.text.is_some()
+        {
+            return None;
+        }
+        for (index, saved) in indexes.fields.iter_mut().zip(dump.fields) {
+            for (value, ordinals) in saved.entries {
+                index
+                    .entries
+                    .insert_mut(Key(value), restored_set(&ordinals, ids)?);
+            }
+            index.unindexed = restored_set(&saved.unindexed, ids)?;
+        }
+        if let (Some(index), Some(saved)) = (&mut indexes.text, dump.text) {
+            for (token, ordinals) in saved {
+                index
+                    .entries
+                    .insert_mut(token, restored_set(&ordinals, ids)?);
+            }
+        }
+        Some(indexes)
+    }
+
     pub fn empty(meta: &CollectionMeta) -> Result<Self> {
         let mut fields = Vec::new();
         let mut text = None;
@@ -270,8 +384,14 @@ impl Indexes {
         files: impl Iterator<Item = &'a FileEntry>,
     ) -> Result<Self> {
         let mut indexes = Self::empty(meta)?;
-        for entry in files {
-            indexes.apply(None, Some(entry));
+        let docs: Vec<(&str, &Doc)> = files
+            .filter_map(|entry| doc_of(entry).map(|doc| (entry.id.as_str(), doc)))
+            .collect();
+        for index in &mut indexes.fields {
+            index.bulk(&docs);
+        }
+        if let Some(index) = &mut indexes.text {
+            index.bulk(&docs);
         }
         Ok(indexes)
     }
