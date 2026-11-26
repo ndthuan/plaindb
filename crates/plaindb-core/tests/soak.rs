@@ -56,11 +56,8 @@ fn log_lines(log: &Path) -> Vec<Value> {
 }
 
 fn begun(log: &Path) -> u64 {
-    let count = log_lines(log)
-        .iter()
-        .filter(|line| line.get("begin").is_some())
-        .count();
-    u64::try_from(count).unwrap()
+    let text = fs::read_to_string(log).unwrap_or_default();
+    u64::try_from(text.matches("\"begin\"").count()).unwrap()
 }
 
 fn unfinished(log: &Path) -> Option<(String, Vec<String>)> {
@@ -174,18 +171,28 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     let mut edits: Vec<(u64, String, String, String)> = Vec::new();
     let mut kills = 0;
     let started = Instant::now();
-    let mut next_kill = Duration::from_millis(200 + random.below(1_500));
+    let total = TRANSACTIONS * CHILDREN as u64;
+    let kill_spacing = total * 9 / 10 / KILLS as u64;
     let mut marker = 0;
+    let mut last_edit = Instant::now();
     loop {
-        std::thread::sleep(Duration::from_millis(50));
-        marker += 1;
-        if let Some(edit) = hand_edit(&root, &mut random, marker) {
-            edits.push(edit);
+        std::thread::sleep(Duration::from_millis(5));
+        if last_edit.elapsed() >= Duration::from_millis(50) {
+            last_edit = Instant::now();
+            marker += 1;
+            if let Some(edit) = hand_edit(&root, &mut random, marker) {
+                edits.push(edit);
+            }
         }
-        if kills < KILLS && started.elapsed() >= next_kill {
-            let index = usize::try_from(random.below(CHILDREN as u64)).unwrap();
-            let slot = &mut slots[index];
-            if slot.child.try_wait().unwrap().is_none() {
+        let progress: u64 = slots.iter().map(|slot| begun(&slot.log)).sum();
+        if kills < KILLS && progress >= (kills as u64 + 1) * kill_spacing {
+            let first = usize::try_from(random.below(CHILDREN as u64)).unwrap();
+            let running = (0..CHILDREN)
+                .map(|offset| (first + offset) % CHILDREN)
+                .find(|index| slots[*index].child.try_wait().unwrap().is_none());
+            if let Some(index) = running {
+                std::thread::sleep(Duration::from_millis(random.below(20)));
+                let slot = &mut slots[index];
                 slot.child.kill().unwrap();
                 slot.child.wait().unwrap();
                 kills += 1;
@@ -197,7 +204,6 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
                 let remaining = TRANSACTIONS - begun(&slot.log);
                 slot.child = spawn(&root, &slot.log, remaining);
             }
-            next_kill = started.elapsed() + Duration::from_millis(100 + random.below(600));
         }
         let mut running = false;
         for slot in &mut slots {
