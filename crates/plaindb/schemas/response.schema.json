@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "plaindb response",
+  "type": "object",
+  "oneOf": [
+    {
+      "properties": {
+        "schema": { "const": 1 },
+        "ok": { "const": true },
+        "result": { "type": "object" }
+      },
+      "required": ["schema", "ok", "result"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "schema": { "const": 1 },
+        "ok": { "const": false },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "enum": [
+                "not_found",
+                "already_exists",
+                "version_conflict",
+                "invalid_name",
+                "invalid_document",
+                "schema_violation",
+                "unique_violation",
+                "invalid_query",
+                "store_locked_timeout",
+                "not_a_store",
+                "unsupported_format",
+                "limit_exceeded",
+                "git_disabled",
+                "git_not_found",
+                "remote_ahead",
+                "io"
+              ]
+            },
+            "message": { "type": "string" },
+            "details": { "type": "object" }
+          },
+          "required": ["code", "message", "details"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["schema", "ok", "error"],
+      "additionalProperties": false
+    }
+  ]
+}

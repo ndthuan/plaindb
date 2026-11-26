@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "find",
+  "type": "object",
+  "properties": {
+    "docs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "doc": { "type": "object" },
+          "version": { "type": "string" }
+        },
+        "required": ["doc", "version"],
+        "additionalProperties": false
+      }
+    },
+    "next_cursor": { "type": ["string", "null"] }
+  },
+  "required": ["docs", "next_cursor"],
+  "additionalProperties": false
+}

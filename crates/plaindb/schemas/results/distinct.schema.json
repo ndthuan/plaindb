@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "distinct",
+  "type": "object",
+  "properties": { "values": { "type": "array" } },
+  "required": ["values"],
+  "additionalProperties": false
+}

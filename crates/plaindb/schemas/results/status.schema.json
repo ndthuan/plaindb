@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "status",
+  "type": "object",
+  "properties": {
+    "documents": { "type": "integer", "minimum": 0 },
+    "store_bytes": { "type": "integer", "minimum": 0 },
+    "invalid": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "db": { "type": "string" },
+          "collection": { "type": "string" },
+          "id": { "type": "string" },
+          "path": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "required": ["db", "collection", "id", "path", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "db": { "type": "string" },
+          "collection": { "type": "string" },
+          "path": { "type": "string" },
+          "details": {}
+        },
+        "required": ["code", "db", "collection", "path", "details"],
+        "additionalProperties": false
+      }
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "commit": { "enum": ["each", "manual"] },
+        "branch": { "type": "string" },
+        "head": { "type": ["string", "null"] },
+        "pending_txs": { "type": "integer", "minimum": 0 },
+        "pending_paths": { "type": "integer", "minimum": 0 },
+        "push": { "enum": ["off", "on-commit"] },
+        "remote": { "type": "string" },
+        "remote_url": { "type": ["string", "null"] },
+        "unpushed": { "type": "integer", "minimum": 0 },
+        "last_push_at": { "type": ["string", "null"] },
+        "last_push_error": { "type": ["string", "null"] },
+        "remote_ahead": { "type": "boolean" },
+        "git_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "enabled",
+        "commit",
+        "branch",
+        "head",
+        "pending_txs",
+        "pending_paths",
+        "push",
+        "remote",
+        "remote_url",
+        "unpushed",
+        "last_push_at",
+        "last_push_error",
+        "remote_ahead",
+        "git_bytes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": ["documents", "store_bytes", "invalid", "warnings", "git"],
+  "additionalProperties": false
+}

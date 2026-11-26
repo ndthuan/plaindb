@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "index list",
+  "type": "object",
+  "properties": {
+    "indexes": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "field": { "type": "string" },
+              "unique": { "type": "boolean" },
+              "multi": { "type": "boolean" }
+            },
+            "required": ["field", "unique", "multi"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "text": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["text"],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": ["indexes"],
+  "additionalProperties": false
+}

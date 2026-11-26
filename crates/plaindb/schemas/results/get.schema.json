@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "get",
+  "type": "object",
+  "properties": {
+    "doc": { "type": "object" },
+    "version": { "type": "string" }
+  },
+  "required": ["doc", "version"],
+  "additionalProperties": false
+}

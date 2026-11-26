@@ -7,4 +7,12 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
-clap = { version = "4.6.10", features = ["derive"] }
+clap = { version = "4.6.10", features = ["derive", "env"] }
+plaindb-core = { version = "0.1.0", path = "../plaindb-core" }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+jsonschema = { version = "0.63.1", default-features = false }
+tempfile = "3.27.0"

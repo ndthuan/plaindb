@@ -1,0 +1,364 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use plaindb_core::{Format, IndexSpec, Op, Store, Tx};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+    json: Value,
+}
+
+fn schema_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("schemas")
+        .join(relative)
+}
+
+fn validator(relative: &str) -> jsonschema::Validator {
+    let text = fs::read_to_string(schema_path(relative)).expect("the schema exists");
+    jsonschema::validator_for(&serde_json::from_str(&text).expect("the schema parses"))
+        .expect("the schema compiles")
+}
+
+fn assert_valid(validator: &jsonschema::Validator, value: &Value) {
+    let errors: Vec<String> = validator
+        .iter_errors(value)
+        .map(|error| error.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?} in {value}");
+}
+
+fn plaindb(store: &Path, kind: Option<&str>, args: &[&str]) -> Run {
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(store)
+        .arg("--json")
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is text");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is text");
+    let mut parsed = Value::Null;
+    if output.status.code() != Some(2) {
+        assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
+        parsed = serde_json::from_str(&stdout).expect("stdout is JSON");
+        assert_valid(&validator("response.schema.json"), &parsed);
+        if let (Some(kind), Some(result)) = (kind, parsed.get("result")) {
+            assert_valid(&validator(&format!("results/{kind}.schema.json")), result);
+        }
+    }
+    Run {
+        code: output.status.code().expect("the binary exits"),
+        stdout,
+        stderr,
+        json: parsed,
+    }
+}
+
+fn human(store: &Path, args: &[&str]) -> Run {
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(store)
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    Run {
+        code: output.status.code().expect("the binary exits"),
+        stdout: String::from_utf8(output.stdout).expect("stdout is text"),
+        stderr: String::from_utf8(output.stderr).expect("stderr is text"),
+        json: Value::Null,
+    }
+}
+
+fn doc(value: Value) -> plaindb_core::Doc {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("not an object: {other}"),
+    }
+}
+
+fn fixture(git: bool) -> TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = if git {
+        Store::init_with_git(dir.path())
+    } else {
+        Store::init(dir.path())
+    }
+    .expect("the store initialises");
+    store.create_db("app").expect("a db");
+    store
+        .create_collection("app", "notes", Format::Json)
+        .expect("a collection");
+    store
+        .set_indexes(
+            "app",
+            "notes",
+            vec![IndexSpec::Field {
+                field: "n".to_owned(),
+                unique: false,
+                multi: false,
+            }],
+        )
+        .expect("an index");
+    store
+        .set_schema(
+            "app",
+            "notes",
+            Some(json!({ "type": "object", "properties": { "n": { "type": "integer" } } })),
+        )
+        .expect("a schema");
+    let ops = (0..5)
+        .map(|n| Op::Put {
+            db: "app".to_owned(),
+            coll: "notes".to_owned(),
+            id: format!("n{n}"),
+            doc: doc(json!({ "n": n, "tag": if n % 2 == 0 { "even" } else { "odd" } })),
+            if_version: None,
+        })
+        .collect();
+    store.apply(Tx::new(ops)).expect("documents are written");
+    dir
+}
+
+#[test]
+fn get_returns_the_document_and_its_version() {
+    let dir = fixture(false);
+    let run = plaindb(dir.path(), Some("get"), &["get", "app", "notes", "n3"]);
+    assert_eq!(run.code, 0);
+    assert_eq!(run.json["ok"], true);
+    assert_eq!(run.json["result"]["doc"]["n"], 3);
+    assert_eq!(run.json["result"]["doc"]["_id"], "n3");
+    assert_eq!(
+        run.json["result"]["version"].as_str().map(str::len),
+        Some(40)
+    );
+}
+
+#[test]
+fn get_of_a_missing_document_is_not_found() {
+    let dir = fixture(false);
+    let run = plaindb(dir.path(), None, &["get", "app", "notes", "missing"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["ok"], false);
+    assert_eq!(run.json["error"]["code"], "not_found");
+}
+
+#[test]
+fn a_bad_filter_is_an_invalid_query() {
+    let dir = fixture(false);
+    let run = plaindb(
+        dir.path(),
+        None,
+        &["find", "app", "notes", "--filter", "{not json"],
+    );
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "invalid_query");
+}
+
+#[test]
+fn a_directory_without_a_store_is_not_a_store() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let run = plaindb(dir.path(), None, &["status"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "not_a_store");
+}
+
+#[test]
+fn find_pages_through_next_cursor() {
+    let dir = fixture(false);
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..5 {
+        let mut args = vec!["find", "app", "notes", "--sort", "n:desc", "--limit", "2"];
+        if let Some(cursor) = &cursor {
+            args.extend(["--cursor", cursor]);
+        }
+        let run = plaindb(dir.path(), Some("find"), &args);
+        assert_eq!(run.code, 0);
+        for entry in run.json["result"]["docs"].as_array().expect("docs") {
+            seen.push(entry["doc"]["_id"].as_str().expect("an id").to_owned());
+        }
+        cursor = run.json["result"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, ["n4", "n3", "n2", "n1", "n0"]);
+}
+
+#[test]
+fn find_filters_and_projects_fields() {
+    let dir = fixture(false);
+    let run = plaindb(
+        dir.path(),
+        Some("find"),
+        &[
+            "find",
+            "app",
+            "notes",
+            "--filter",
+            r#"{"tag":"even"}"#,
+            "--sort",
+            "n",
+            "--fields",
+            "n",
+        ],
+    );
+    assert_eq!(run.code, 0);
+    let docs = run.json["result"]["docs"].as_array().expect("docs");
+    let numbers: Vec<&Value> = docs.iter().map(|entry| &entry["doc"]["n"]).collect();
+    assert_eq!(numbers, [0, 2, 4]);
+    assert!(docs[0]["doc"].get("tag").is_none());
+}
+
+#[test]
+fn count_and_distinct_answer_over_a_filter() {
+    let dir = fixture(false);
+    let count = plaindb(
+        dir.path(),
+        Some("count"),
+        &["count", "app", "notes", "--filter", r#"{"n":{"$gte":2}}"#],
+    );
+    assert_eq!(count.json["result"]["count"], 3);
+    let distinct = plaindb(
+        dir.path(),
+        Some("distinct"),
+        &["distinct", "app", "notes", "tag"],
+    );
+    let mut values: Vec<String> = distinct.json["result"]["values"]
+        .as_array()
+        .expect("values")
+        .iter()
+        .map(|value| value.as_str().expect("text").to_owned())
+        .collect();
+    values.sort();
+    assert_eq!(values, ["even", "odd"]);
+}
+
+#[test]
+fn listings_report_names_schema_and_indexes() {
+    let dir = fixture(false);
+    let dbs = plaindb(dir.path(), Some("dbs"), &["db", "list"]);
+    assert_eq!(dbs.json["result"]["dbs"], json!(["app"]));
+    let collections = plaindb(
+        dir.path(),
+        Some("collections"),
+        &["collection", "list", "app"],
+    );
+    assert_eq!(collections.json["result"]["collections"], json!(["notes"]));
+    let schema = plaindb(
+        dir.path(),
+        Some("schema"),
+        &["collection", "schema", "get", "app", "notes"],
+    );
+    assert_eq!(schema.json["result"]["schema"]["type"], "object");
+    let indexes = plaindb(
+        dir.path(),
+        Some("indexes"),
+        &["index", "list", "app", "notes"],
+    );
+    assert_eq!(
+        indexes.json["result"]["indexes"],
+        json!([{ "field": "n", "unique": false, "multi": false }])
+    );
+}
+
+#[test]
+fn status_counts_documents_and_reports_git() {
+    let dir = fixture(true);
+    let run = plaindb(dir.path(), Some("status"), &["status"]);
+    assert_eq!(run.code, 0);
+    assert_eq!(run.json["result"]["documents"], 5);
+    assert_eq!(run.json["result"]["git"]["enabled"], true);
+    assert_eq!(run.json["result"]["invalid"], json!([]));
+}
+
+#[test]
+fn history_and_get_at_read_earlier_versions() {
+    let dir = fixture(true);
+    let store = Store::open(dir.path()).expect("the store opens");
+    store
+        .apply(Tx {
+            actor: Some("tester".to_owned()),
+            ..Tx::new(vec![Op::Put {
+                db: "app".to_owned(),
+                coll: "notes".to_owned(),
+                id: "n1".to_owned(),
+                doc: doc(json!({ "n": 10 })),
+                if_version: None,
+            }])
+        })
+        .expect("a second version");
+    drop(store);
+    let history = plaindb(
+        dir.path(),
+        Some("history"),
+        &["history", "app", "notes", "n1"],
+    );
+    assert_eq!(history.code, 0);
+    let entries = history.json["result"]["entries"]
+        .as_array()
+        .expect("entries");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["actor"], "tester");
+    let first = entries[1]["commit"].as_str().expect("a commit");
+    let old = plaindb(
+        dir.path(),
+        Some("get"),
+        &["get", "app", "notes", "n1", "--at", first],
+    );
+    assert_eq!(old.code, 0);
+    assert_eq!(old.json["result"]["doc"]["n"], 1);
+    let now = plaindb(
+        dir.path(),
+        Some("get"),
+        &["get", "app", "notes", "n1", "--at", "2999-01-01T00:00:00Z"],
+    );
+    assert_eq!(now.json["result"]["doc"]["n"], 10);
+}
+
+#[test]
+fn history_without_git_is_git_disabled() {
+    let dir = fixture(false);
+    let run = plaindb(dir.path(), None, &["history", "app", "notes", "n1"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "git_disabled");
+}
+
+#[test]
+fn the_human_form_prints_documents_and_errors_apart() {
+    let dir = fixture(false);
+    let found = human(dir.path(), &["get", "app", "notes", "n2"]);
+    assert_eq!(found.code, 0);
+    let printed: Value = serde_json::from_str(&found.stdout).expect("pretty JSON");
+    assert_eq!(printed["_id"], "n2");
+    assert!(found.stdout.lines().count() > 1);
+    let listed = human(dir.path(), &["find", "app", "notes", "--limit", "2"]);
+    assert_eq!(listed.stdout.lines().count(), 2);
+    let missing = human(dir.path(), &["get", "app", "notes", "nope"]);
+    assert_eq!(missing.code, 1);
+    assert!(missing.stdout.is_empty());
+    assert!(missing.stderr.starts_with("error[not_found]: "));
+}
+
+#[test]
+fn the_store_comes_from_the_environment_and_usage_errors_exit_two() {
+    let dir = fixture(false);
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .env("PLAINDB_STORE", dir.path())
+        .args(["--json", "count", "app", "notes"])
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(0));
+    let usage = plaindb(dir.path(), None, &["get", "app"]);
+    assert_eq!(usage.code, 2);
+    assert!(usage.stdout.is_empty());
+    assert!(!usage.stderr.is_empty());
+}

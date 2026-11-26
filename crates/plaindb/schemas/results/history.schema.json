@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "history",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "commit": { "type": "string" },
+          "time": { "type": "string" },
+          "actor": { "type": ["string", "null"] },
+          "tx_ids": { "type": "array", "items": { "type": "string" } },
+          "version": { "type": ["string", "null"] }
+        },
+        "required": ["commit", "time", "actor", "tx_ids", "version"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["entries"],
+  "additionalProperties": false
+}
