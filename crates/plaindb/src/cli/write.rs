@@ -138,7 +138,7 @@ fn write_output(result: &TxResult) -> Output {
     Output::lines(value, lines)
 }
 
-fn apply(context: &Context, ops: Vec<Op>) -> Result<Output> {
+pub fn apply(context: &Context, ops: Vec<Op>) -> Result<Output> {
     let store = context.open()?;
     let result = store.apply(context.transaction(ops))?;
     Ok(write_output(&result))

@@ -1,9 +1,9 @@
-mod admin;
-mod git;
-mod output;
-mod read;
-mod transfer;
-mod write;
+pub mod admin;
+pub mod git;
+pub mod output;
+pub mod read;
+pub mod transfer;
+pub mod write;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use plaindb_core::{Error, ErrorCode, Op, Result, Store, Tx};
 use serde_json::{Value, json};
 
+use crate::mcp;
 use output::{Output, print_failure, print_success};
 
 #[derive(Parser)]
@@ -93,6 +94,8 @@ pub enum Command {
     Collection(CollectionCommand),
     #[command(subcommand, about = "Indexes")]
     Index(IndexCommand),
+    #[command(about = "Serve the store to AI agents over the Model Context Protocol")]
+    Mcp(mcp::McpArgs),
 }
 
 #[derive(Subcommand)]
@@ -235,6 +238,7 @@ fn run(context: &Context, command: Command) -> Result<Output> {
         }
         Command::Index(IndexCommand::Add(args)) => admin::add_index(&context.open()?, &args),
         Command::Index(IndexCommand::Drop(args)) => admin::drop_index(&context.open()?, &args),
+        Command::Mcp(args) => mcp::serve(context, &args),
     }
 }
 

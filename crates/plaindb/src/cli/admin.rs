@@ -330,11 +330,20 @@ pub fn set_schema(store: &Store, args: &SchemaSetArgs) -> Result<Output> {
         }
         None => None,
     };
+    set_schema_value(store, &args.db, &args.coll, schema)
+}
+
+pub fn set_schema_value(
+    store: &Store,
+    db: &str,
+    coll: &str,
+    schema: Option<Value>,
+) -> Result<Output> {
     let has_schema = schema.is_some();
-    store.set_schema(&args.db, &args.coll, schema)?;
+    store.set_schema(db, coll, schema)?;
     let collection = CollectionArgs {
-        db: args.db.clone(),
-        coll: args.coll.clone(),
+        db: db.to_owned(),
+        coll: coll.to_owned(),
     };
     Ok(Output::text(
         collection_ack(&collection, json!({ "has_schema": has_schema })),

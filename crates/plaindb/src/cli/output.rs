@@ -51,16 +51,16 @@ pub fn success_envelope(result: &Value) -> Value {
     json!({ "schema": SCHEMA_VERSION, "ok": true, "result": result })
 }
 
-pub fn failure_envelope(error: &Error) -> Value {
+pub fn error_object(error: &Error) -> Value {
     json!({
-        "schema": SCHEMA_VERSION,
-        "ok": false,
-        "error": {
-            "code": error.code.as_str(),
-            "message": error.message,
-            "details": error.details,
-        },
+        "code": error.code.as_str(),
+        "message": error.message,
+        "details": error.details,
     })
+}
+
+pub fn failure_envelope(error: &Error) -> Value {
+    json!({ "schema": SCHEMA_VERSION, "ok": false, "error": error_object(error) })
 }
 
 fn write_line(mut sink: impl Write, text: &str) {
