@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use plaindb_core::{
-    Format, Store, Tx, TxResult, WriteLock, codec_for, scan::read_generation, version_of,
+    Format, Store, TxResult, WriteLock, codec_for, scan::read_generation, version_of,
 };
 use serde_json::{Value, json};
 
@@ -68,14 +68,20 @@ fn unfinished(log: &Path) -> Option<(String, Vec<String>)> {
     Some((tx_id, collections))
 }
 
-fn settle(store: &Store, tx_id: &str) -> Option<TxResult> {
-    let answer = store
-        .apply(Tx {
-            id: Some(tx_id.to_owned()),
-            ..Tx::new(Vec::new())
-        })
-        .unwrap();
-    (!answer.results.is_empty()).then_some(answer)
+fn settle(root: &Path, tx_id: &str) -> Option<TxResult> {
+    let state = root.join(".plaindb");
+    if let Ok(bytes) = fs::read(state.join("journal.json")) {
+        let journal: Value = serde_json::from_slice(&bytes).unwrap();
+        if journal["tx_id"] == json!(tx_id) {
+            return Some(serde_json::from_value(journal["result"].clone()).unwrap());
+        }
+    }
+    fs::read_to_string(state.join("tx-log.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["tx_id"] == json!(tx_id))
+        .map(|record| serde_json::from_value(record["result"].clone()).unwrap())
 }
 
 struct Random(u64);
@@ -184,26 +190,29 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
                 edits.push(edit);
             }
         }
-        let progress: u64 = slots.iter().map(|slot| begun(&slot.log)).sum();
-        if kills < KILLS && progress >= (kills as u64 + 1) * kill_spacing {
+        while kills < KILLS
+            && slots.iter().map(|slot| begun(&slot.log)).sum::<u64>()
+                >= (kills as u64 + 1) * kill_spacing
+        {
             let first = usize::try_from(random.below(CHILDREN as u64)).unwrap();
             let running = (0..CHILDREN)
                 .map(|offset| (first + offset) % CHILDREN)
                 .find(|index| slots[*index].child.try_wait().unwrap().is_none());
-            if let Some(index) = running {
-                std::thread::sleep(Duration::from_millis(random.below(20)));
-                let slot = &mut slots[index];
-                slot.child.kill().unwrap();
-                slot.child.wait().unwrap();
-                kills += 1;
-                if let Some((tx_id, collections)) = unfinished(&slot.log)
-                    && let Some(result) = settle(&store, &tx_id)
-                {
-                    settled.push((collections, result));
-                }
-                let remaining = TRANSACTIONS - begun(&slot.log);
-                slot.child = spawn(&root, &slot.log, remaining);
+            let Some(index) = running else {
+                break;
+            };
+            std::thread::sleep(Duration::from_millis(random.below(20)));
+            let slot = &mut slots[index];
+            slot.child.kill().unwrap();
+            slot.child.wait().unwrap();
+            kills += 1;
+            if let Some((tx_id, collections)) = unfinished(&slot.log)
+                && let Some(result) = settle(&root, &tx_id)
+            {
+                settled.push((collections, result));
             }
+            let remaining = TRANSACTIONS - begun(&slot.log);
+            slot.child = spawn(&root, &slot.log, remaining);
         }
         let mut running = false;
         for slot in &mut slots {
