@@ -2,7 +2,7 @@
 
 All notable changes to plaindb are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-26
 
 First release.
 
@@ -18,4 +18,4 @@ First release.
 - `plaindb doctor` and the settings commands `config get` and `config set`.
 - `plaindb mcp`, a Model Context Protocol server with 25 tools and read-only and drop switches.
 - Compressed postings in the indexes, with a memory budget checked by `make soak`.
-- Release archives for macOS on Apple silicon and for Linux on x86_64 and aarch64, with a `SHA256SUMS` file.
+- Release archives for macOS on Apple silicon and for Linux on x86_64 and aarch64, with a checksum file per archive and a `SHA256SUMS` file.
