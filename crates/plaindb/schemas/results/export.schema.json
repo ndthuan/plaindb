@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "export to a file",
+  "type": "object",
+  "properties": {
+    "exported": { "type": "integer", "minimum": 0 },
+    "out": { "type": "string" }
+  },
+  "required": ["exported", "out"],
+  "additionalProperties": false
+}

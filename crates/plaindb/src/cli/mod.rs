@@ -2,6 +2,7 @@ mod admin;
 mod git;
 mod output;
 mod read;
+mod transfer;
 mod write;
 
 use std::path::PathBuf;
@@ -78,6 +79,10 @@ pub enum Command {
     Push(git::PushArgs),
     #[command(about = "Check every document against its schema")]
     Validate,
+    #[command(about = "Add documents from a JSONL file or a directory of files")]
+    Import(transfer::ImportArgs),
+    #[command(about = "Write every document of a collection as JSONL")]
+    Export(transfer::ExportArgs),
     #[command(about = "Look for changes made to the files by hand")]
     Rescan,
     #[command(about = "Drop the index cache and read every file again")]
@@ -212,6 +217,8 @@ fn run(context: &Context, command: Command) -> Result<Output> {
         }
         Command::Commit(args) => git::commit(context, &args),
         Command::Push(args) => git::push(&context.open()?, &args),
+        Command::Import(args) => transfer::import(context, &args),
+        Command::Export(args) => transfer::export(context, &args),
         Command::Validate => admin::validate(&context.open()?),
         Command::Rescan => admin::rescan(&context.open()?),
         Command::Reindex => admin::reindex(context),

@@ -9,6 +9,7 @@ pub enum Human {
     Pretty,
     Lines(Vec<String>),
     Text(String),
+    Streamed,
 }
 
 pub struct Output {
@@ -28,6 +29,13 @@ impl Output {
         Self {
             result,
             human: Human::Lines(lines),
+        }
+    }
+
+    pub fn streamed() -> Self {
+        Self {
+            result: Value::Null,
+            human: Human::Streamed,
         }
     }
 
@@ -60,6 +68,9 @@ fn write_line(mut sink: impl Write, text: &str) {
 }
 
 pub fn print_success(json: bool, output: &Output) {
+    if matches!(output.human, Human::Streamed) {
+        return;
+    }
     let stdout = io::stdout().lock();
     if json {
         write_line(stdout, &success_envelope(&output.result).to_string());
@@ -77,6 +88,7 @@ pub fn print_success(json: bool, output: &Output) {
             }
         }
         Human::Text(text) => write_line(stdout, text),
+        Human::Streamed => {}
     }
 }
 

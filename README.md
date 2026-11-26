@@ -4,6 +4,32 @@ A NoSQL document database stored as plain text files, versioned and backed up wi
 
 Status: early development.
 
+## Command line
+
+`plaindb` takes the store from `--store <dir>`, then `PLAINDB_STORE`, then the current directory.
+
+```
+plaindb init --git
+plaindb db create app
+plaindb collection create app notes --format md
+plaindb insert app notes --data '{"title": "First", "body": "Hello"}'
+plaindb find app notes --filter '{"title": "First"}' --sort title --limit 10
+plaindb patch app notes <id> --data '{"title": "Second"}' --if-version <version>
+plaindb import app notes --dir ./old-notes
+plaindb export app notes --jsonl --out notes.jsonl
+```
+
+Run `plaindb --help` for every command. Settings are read and changed with `plaindb config get` and `plaindb config set`.
+
+With `--json` every command prints exactly one line:
+
+```
+{"schema":1,"ok":true,"result":{...}}
+{"schema":1,"ok":false,"error":{"code":"not_found","message":"...","details":{}}}
+```
+
+The exit status is 0 on success, 1 when plaindb reports an error and 2 for a usage error. `schema` changes only with a breaking change to a response, and JSON Schema files for every response are in `crates/plaindb/schemas`. `export` without `--out` prints the documents themselves, one per line, in place of that object. `import` takes JSONL (`--jsonl <file>` or `-` for standard input) or a directory (`--dir`) of `.json`, `.yaml`, `.yml` and `.md` files whose names are the ids; documents that fail a check are listed in `failed` and the others are written, 500 to a transaction.
+
 ## Backup and restore
 
 Git is optional. With it on, every transaction becomes one commit, or in manual mode one commit gathers many transactions, and each commit carries the ids of the transactions it holds.
