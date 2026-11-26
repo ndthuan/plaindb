@@ -217,7 +217,7 @@ impl Store {
         Ok(())
     }
 
-    fn with_collection<T>(
+    pub(crate) fn with_collection<T>(
         &self,
         db: &str,
         collection: &str,
