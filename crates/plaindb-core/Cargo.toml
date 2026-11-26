@@ -11,10 +11,13 @@ test-hooks = []
 testgen = []
 
 [dependencies]
+serde-saphyr = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sha1 = "0.11.0"
 thiserror = "2.0.21"
 ulid = "3.0.0"
 
 [dev-dependencies]
+proptest = "1.12.0"
 tempfile = "3.27.0"

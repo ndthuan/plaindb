@@ -1,0 +1,5 @@
+# a leading comment
+zeta: 1
+alpha:
+  y: 2  # trailing comment
+  x: Trường Sa
