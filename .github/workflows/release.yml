@@ -80,17 +80,20 @@ jobs:
         run: codesign -s - target/${{ matrix.target }}/release/plaindb
       - run: scripts/smoke.sh target/${{ matrix.target }}/release/plaindb
       - name: Package the binary
-        if: github.event_name == 'push'
         run: |
-          name="plaindb-$GITHUB_REF_NAME-${{ matrix.target }}"
+          name="plaindb-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
           cp target/${{ matrix.target }}/release/plaindb LICENSE README.md "$name/"
           tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          shasum -a 256 -c "$name.tar.gz.sha256"
       - name: Upload the archive
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" "plaindb-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz" --clobber
+        run: |
+          name="plaindb-$GITHUB_REF_NAME-${{ matrix.target }}"
+          gh release upload "$GITHUB_REF_NAME" "$name.tar.gz" "$name.tar.gz.sha256" --clobber
 
   sums:
     needs: build
