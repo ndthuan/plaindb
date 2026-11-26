@@ -12,6 +12,7 @@ pub mod journal;
 mod jsontext;
 pub mod lock;
 pub mod names;
+pub mod ops;
 pub mod query;
 pub mod scan;
 pub mod snapshot;
