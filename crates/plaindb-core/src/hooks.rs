@@ -31,6 +31,18 @@ mod enabled {
             crash();
         }
     }
+
+    pub(crate) fn before_git_commit() {
+        if var("PLAINDB_TEST_CRASH_BEFORE_COMMIT").as_deref() == Some("1") {
+            crash();
+        }
+    }
+
+    pub(crate) fn after_git_commit() {
+        if var("PLAINDB_TEST_CRASH_AFTER_COMMIT").as_deref() == Some("1") {
+            crash();
+        }
+    }
 }
 
 #[cfg(not(feature = "test-hooks"))]
@@ -40,6 +52,12 @@ mod enabled {
     pub(crate) fn after_journal() {}
 
     pub(crate) fn after_files(_applied: usize) {}
+
+    pub(crate) fn before_git_commit() {}
+
+    pub(crate) fn after_git_commit() {}
 }
 
-pub(crate) use enabled::{after_files, after_journal, before_journal};
+pub(crate) use enabled::{
+    after_files, after_git_commit, after_journal, before_git_commit, before_journal,
+};

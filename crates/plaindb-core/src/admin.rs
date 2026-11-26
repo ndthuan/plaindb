@@ -4,11 +4,12 @@ use serde_json::{Value, json};
 
 use crate::config::{CollectionMeta, Format, IndexSpec, STORE_FORMAT, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
+use crate::git;
 use crate::index::Indexes;
-use crate::journal::{self, Journal, JournalEntry};
+use crate::journal::{self, JournalEntry};
 use crate::names::{new_id, validate_collection_name, validate_db_name};
 use crate::scan::{self, SYSTEM_FIELDS, compile_validator};
-use crate::store::{DB_FILE, META_FILE, Store};
+use crate::store::{DB_FILE, META_FILE, Store, read_config};
 
 fn already_exists(kind: &str, name: &str) -> Error {
     Error::new(
@@ -21,14 +22,11 @@ fn already_exists(kind: &str, name: &str) -> Error {
 }
 
 impl Store {
-    fn commit_admin(&self, entries: Vec<JournalEntry>) -> Result<()> {
+    pub(crate) fn commit_admin(&self, subject: &str, entries: Vec<JournalEntry>) -> Result<()> {
         let generation = self.snapshot.load().generation + 1;
-        let journal = Journal {
-            tx_id: new_id(),
-            generation,
-            result: None,
-            entries,
-        };
+        let tx_id = new_id();
+        let plan = git::plan_admin(&self.root, &read_config(&self.root)?, &tx_id, subject)?;
+        let journal = plan.into_journal(tx_id, generation, entries);
         journal::commit(&self.root, &journal)?;
         let current = self.snapshot.load_full();
         self.snapshot
@@ -36,12 +34,21 @@ impl Store {
         Ok(())
     }
 
-    fn write_meta(&self, db: &str, collection: &str, meta: &CollectionMeta) -> Result<()> {
-        self.commit_admin(vec![JournalEntry::write(
-            format!("{db}/{collection}/{META_FILE}"),
-            &to_file_bytes(meta),
-            None,
-        )])
+    fn write_meta(
+        &self,
+        subject: &str,
+        db: &str,
+        collection: &str,
+        meta: &CollectionMeta,
+    ) -> Result<()> {
+        self.commit_admin(
+            subject,
+            vec![JournalEntry::write(
+                format!("{db}/{collection}/{META_FILE}"),
+                &to_file_bytes(meta),
+                None,
+            )],
+        )
     }
 
     pub fn create_db(&self, db: &str) -> Result<()> {
@@ -50,17 +57,23 @@ impl Store {
         if self.root.join(db).join(DB_FILE).is_file() {
             return Err(already_exists("db", db));
         }
-        self.commit_admin(vec![JournalEntry::write(
-            format!("{db}/{DB_FILE}"),
-            &to_file_bytes(&json!({ "format": STORE_FORMAT })),
-            None,
-        )])
+        self.commit_admin(
+            &format!("init db {db}"),
+            vec![JournalEntry::write(
+                format!("{db}/{DB_FILE}"),
+                &to_file_bytes(&json!({ "format": STORE_FORMAT })),
+                None,
+            )],
+        )
     }
 
     pub fn drop_db(&self, db: &str) -> Result<()> {
         let _lock = self.begin_write()?;
         self.db_dir(db)?;
-        self.commit_admin(vec![JournalEntry::remove_tree(db.to_owned())])
+        self.commit_admin(
+            &format!("drop db {db}"),
+            vec![JournalEntry::remove_tree(db.to_owned())],
+        )
     }
 
     pub fn create_collection(&self, db: &str, collection: &str, format: Format) -> Result<()> {
@@ -71,15 +84,21 @@ impl Store {
         if dir.join(META_FILE).is_file() {
             return Err(already_exists("collection", collection));
         }
-        self.write_meta(db, collection, &CollectionMeta::new(format))
+        self.write_meta(
+            &format!("init collection {db}/{collection} ({})", format.extension()),
+            db,
+            collection,
+            &CollectionMeta::new(format),
+        )
     }
 
     pub fn drop_collection(&self, db: &str, collection: &str) -> Result<()> {
         let _lock = self.begin_write()?;
         self.collection_dir(db, collection)?;
-        self.commit_admin(vec![JournalEntry::remove_tree(format!(
-            "{db}/{collection}"
-        ))])
+        self.commit_admin(
+            &format!("drop collection {db}/{collection}"),
+            vec![JournalEntry::remove_tree(format!("{db}/{collection}"))],
+        )
     }
 
     pub fn set_schema(&self, db: &str, collection: &str, schema: Option<Value>) -> Result<()> {
@@ -113,7 +132,17 @@ impl Store {
                 .with_detail("ids", failing));
             }
         }
-        self.write_meta(db, collection, &meta)
+        let action = if meta.schema.is_some() {
+            "set schema"
+        } else {
+            "clear schema"
+        };
+        self.write_meta(
+            &format!("meta {db}/{collection}: {action}"),
+            db,
+            collection,
+            &meta,
+        )
     }
 
     pub fn set_indexes(&self, db: &str, collection: &str, indexes: Vec<IndexSpec>) -> Result<()> {
@@ -130,6 +159,11 @@ impl Store {
                 Indexes::validate_new(db, collection, &meta, found.files.values())?;
             }
         }
-        self.write_meta(db, collection, &meta)
+        self.write_meta(
+            &format!("meta {db}/{collection}: set indexes"),
+            db,
+            collection,
+            &meta,
+        )
     }
 }

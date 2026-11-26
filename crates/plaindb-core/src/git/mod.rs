@@ -1,0 +1,490 @@
+mod commit;
+mod foreign;
+mod history;
+mod message;
+mod pending;
+
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use gix::ObjectId;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::atomic::{TEMP_MARKER, remove_durable, replace_unsynced};
+use crate::config::{CommitMode, StoreConfig, to_file_bytes};
+use crate::error::{Error, ErrorCode, Result};
+use crate::journal::{Journal, JournalEntry};
+use crate::names::{new_id, validate_db_name};
+use crate::store::{DB_FILE, STATE_DIR, STORE_FILE, Store, read_config};
+use crate::write::{Op, OpResult};
+
+pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
+pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
+pub use pending::PendingTx;
+
+pub(crate) use commit::commit_journal;
+pub(crate) use foreign::check_head;
+pub(crate) use pending::append as append_pending;
+
+pub const GITIGNORE_FILE: &str = ".gitignore";
+pub const GITIGNORE_LINE: &str = ".plaindb/";
+pub const LAST_COMMIT_FILE: &str = "last-commit";
+pub const WARNINGS_FILE: &str = "warnings.json";
+pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
+const GIT_DIR: &str = ".git";
+const FALLBACK_NAME: &str = "plaindb";
+const FALLBACK_EMAIL: &str = "plaindb@localhost";
+const INIT_STORE_SUBJECT: &str = "init store";
+const ENABLE_SUBJECT: &str = "git: enable";
+
+pub type CommitId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStatus {
+    pub enabled: bool,
+    pub commit: CommitMode,
+    pub branch: String,
+    pub head: Option<CommitId>,
+    pub pending_txs: u64,
+    pub pending_paths: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ForeignWarning {
+    pub code: String,
+    pub ids: Vec<String>,
+    pub at: String,
+    pub head: String,
+}
+
+pub(crate) fn git_error(error: impl std::fmt::Display) -> Error {
+    Error::new(ErrorCode::Io, error.to_string()).with_detail("reason", "git")
+}
+
+pub(crate) fn git_disabled() -> Error {
+    Error::new(ErrorCode::GitDisabled, "git is not enabled for this store")
+}
+
+pub(crate) fn open(root: &Path) -> Result<gix::Repository> {
+    gix::open(root).map_err(git_error)
+}
+
+pub(crate) fn head_id(repo: &gix::Repository) -> Result<Option<ObjectId>> {
+    Ok(repo.head().map_err(git_error)?.id().map(gix::Id::detach))
+}
+
+fn config_value(repo: &gix::Repository, key: &str) -> Option<String> {
+    repo.config_snapshot()
+        .string(key)
+        .map(|value| message::one_line(&value.to_string()))
+        .filter(|value| !value.is_empty())
+}
+
+fn os_user() -> Option<String> {
+    ["USER", "USERNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| message::one_line(&value))
+        .find(|value| !value.is_empty())
+}
+
+pub(crate) fn resolve_actor(repo: &gix::Repository, given: Option<&str>) -> String {
+    given
+        .map(message::one_line)
+        .filter(|value| !value.is_empty())
+        .or_else(|| config_value(repo, "user.email"))
+        .or_else(os_user)
+        .unwrap_or_else(|| FALLBACK_NAME.to_owned())
+}
+
+pub(crate) fn signature(repo: &gix::Repository) -> gix::actor::Signature {
+    gix::actor::Signature {
+        name: config_value(repo, "user.name")
+            .unwrap_or_else(|| FALLBACK_NAME.to_owned())
+            .into(),
+        email: config_value(repo, "user.email")
+            .unwrap_or_else(|| FALLBACK_EMAIL.to_owned())
+            .into(),
+        time: gix::date::Time::now_local_or_utc(),
+    }
+}
+
+fn state_file(root: &Path, name: &str) -> PathBuf {
+    root.join(STATE_DIR).join(name)
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(source.into()),
+    }
+}
+
+pub(crate) fn read_last_commit(root: &Path) -> Result<Option<ObjectId>> {
+    let Some(bytes) = read_optional(&state_file(root, LAST_COMMIT_FILE))? else {
+        return Ok(None);
+    };
+    Ok(ObjectId::from_hex(String::from_utf8_lossy(&bytes).trim().as_bytes()).ok())
+}
+
+pub(crate) fn write_last_commit(root: &Path, id: ObjectId) -> Result<()> {
+    replace_unsynced(
+        &state_file(root, LAST_COMMIT_FILE),
+        format!("{id}\n").as_bytes(),
+    )
+}
+
+pub(crate) fn read_warning(root: &Path) -> Result<Option<ForeignWarning>> {
+    let Some(bytes) = read_optional(&state_file(root, WARNINGS_FILE))? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_slice(&bytes).ok())
+}
+
+pub(crate) fn write_warning(root: &Path, warning: &ForeignWarning) -> Result<()> {
+    replace_unsynced(&state_file(root, WARNINGS_FILE), &to_file_bytes(warning))
+}
+
+pub(crate) fn clear_warning(root: &Path) -> Result<()> {
+    remove_durable(&state_file(root, WARNINGS_FILE))
+}
+
+fn is_hidden(name: &str) -> bool {
+    name.starts_with('.') || name.contains(TEMP_MARKER)
+}
+
+fn collect_files(dir: &Path, prefix: &str, files: &mut BTreeMap<String, PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if is_hidden(&name) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        let relative = format!("{prefix}/{name}");
+        if kind.is_dir() {
+            collect_files(&entry.path(), &relative, files)?;
+        } else if kind.is_file() {
+            files.insert(relative, entry.path());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn worktree_files(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let mut files = BTreeMap::new();
+    for name in [STORE_FILE, GITIGNORE_FILE] {
+        let path = root.join(name);
+        if path.is_file() {
+            files.insert(name.to_owned(), path);
+        }
+    }
+    for db in crate::store::child_directories(root, DB_FILE, validate_db_name)? {
+        collect_files(&root.join(&db), &db, &mut files)?;
+    }
+    Ok(files)
+}
+
+pub(crate) fn in_scope(path: &str) -> bool {
+    if path == STORE_FILE || path == GITIGNORE_FILE {
+        return true;
+    }
+    path.split_once('/')
+        .is_some_and(|(db, _)| validate_db_name(db).is_ok())
+}
+
+fn ensure_gitignore(root: &Path) -> Result<()> {
+    let path = root.join(GITIGNORE_FILE);
+    let existing = read_optional(&path)?.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let text = match existing {
+        Some(text) if text.lines().any(|line| line.trim() == GITIGNORE_LINE) => return Ok(()),
+        Some(text) if text.is_empty() || text.ends_with('\n') => {
+            format!("{text}{GITIGNORE_LINE}\n")
+        }
+        Some(text) => format!("{text}\n{GITIGNORE_LINE}\n"),
+        None => format!("{GITIGNORE_LINE}\n"),
+    };
+    crate::atomic::write_atomic(&path, text.as_bytes())
+}
+
+fn init_repo(root: &Path, branch: &str) -> Result<()> {
+    use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
+    use gix::refs::{FullName, Target};
+
+    let branch_ref = FullName::try_from(format!("refs/heads/{branch}"))
+        .map_err(|_| Error::invalid_name("branch", branch))?;
+    let repo = gix::init(root).map_err(git_error)?;
+    let signature = signature(&repo);
+    let mut time = gix::date::parse::TimeBuf::default();
+    let edit = RefEdit {
+        change: Change::Update {
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: "init".into(),
+            },
+            expected: PreviousValue::Any,
+            new: Target::Symbolic(branch_ref),
+        },
+        name: "HEAD".try_into().map_err(git_error)?,
+        deref: false,
+    };
+    repo.edit_references_as(Some(edit), Some(signature.to_ref(&mut time)))
+        .map_err(git_error)?;
+    Ok(())
+}
+
+pub(crate) struct GitPlan {
+    pub commit_message: Option<String>,
+    pub pending: Option<PendingTx>,
+}
+
+impl GitPlan {
+    pub fn none() -> Self {
+        Self {
+            commit_message: None,
+            pending: None,
+        }
+    }
+
+    pub fn into_journal(
+        self,
+        tx_id: String,
+        generation: u64,
+        entries: Vec<JournalEntry>,
+    ) -> Journal {
+        Journal {
+            tx_id,
+            generation,
+            result: None,
+            entries,
+            commit_pending: self.commit_message.is_some(),
+            commit_message: self.commit_message,
+            pending_tx: self.pending,
+        }
+    }
+}
+
+fn plan(
+    root: &Path,
+    config: &StoreConfig,
+    tx_id: &str,
+    actor: Option<&str>,
+    lines: Vec<String>,
+    message: impl FnOnce(&str) -> String,
+) -> Result<GitPlan> {
+    if !config.git {
+        return Ok(GitPlan::none());
+    }
+    let repo = open(root)?;
+    let actor = resolve_actor(&repo, actor);
+    Ok(match config.commit {
+        CommitMode::Each => GitPlan {
+            commit_message: Some(message(&actor)),
+            pending: None,
+        },
+        CommitMode::Manual => GitPlan {
+            commit_message: None,
+            pending: Some(PendingTx {
+                tx_id: tx_id.to_owned(),
+                actor,
+                ops: lines,
+            }),
+        },
+    })
+}
+
+pub(crate) fn plan_tx(
+    root: &Path,
+    config: &StoreConfig,
+    tx_id: &str,
+    actor: Option<&str>,
+    ops: &[Op],
+    results: &[OpResult],
+) -> Result<GitPlan> {
+    let summaries = message::summarize(ops, results);
+    let lines = summaries.iter().map(ToString::to_string).collect();
+    plan(root, config, tx_id, actor, lines, |actor| {
+        message::tx_message(&summaries, tx_id, actor)
+    })
+}
+
+pub(crate) fn plan_admin(
+    root: &Path,
+    config: &StoreConfig,
+    tx_id: &str,
+    subject: &str,
+) -> Result<GitPlan> {
+    plan(
+        root,
+        config,
+        tx_id,
+        None,
+        vec![subject.to_owned()],
+        |actor| message::admin_message(subject, tx_id, actor),
+    )
+}
+
+pub(crate) fn prepare_write(root: &Path) -> Result<bool> {
+    let config = read_config(root)?;
+    if !config.git {
+        return Ok(false);
+    }
+    if !root.join(GIT_DIR).exists() {
+        init_repo(root, &config.branch)?;
+        ensure_gitignore(root)?;
+    }
+    let repo = open(root)?;
+    if head_id(&repo)?.is_none() {
+        commit_worktree(root, ENABLE_SUBJECT)?;
+        return Ok(true);
+    }
+    check_head(root, &repo)
+}
+
+fn commit_worktree(root: &Path, subject: &str) -> Result<Option<ObjectId>> {
+    let changes = commit::worktree_changes(root)?;
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let repo = open(root)?;
+    let tx_id = new_id();
+    let actor = resolve_actor(&repo, None);
+    let text = message::admin_message(subject, &tx_id, &actor);
+    commit::commit_changes(root, &changes, &text, &tx_id).map(Some)
+}
+
+impl Store {
+    pub fn init_with_git(dir: impl AsRef<Path>) -> Result<Self> {
+        let store = Self::init(dir)?;
+        store.turn_git_on(INIT_STORE_SUBJECT)?;
+        Ok(store)
+    }
+
+    pub fn enable_git(&self) -> Result<()> {
+        self.turn_git_on(ENABLE_SUBJECT)
+    }
+
+    fn turn_git_on(&self, subject: &str) -> Result<()> {
+        let _lock = self.begin_write()?;
+        let mut config = read_config(&self.root)?;
+        if config.git {
+            return Ok(());
+        }
+        if !self.root.join(GIT_DIR).exists() {
+            init_repo(&self.root, &config.branch)?;
+        }
+        ensure_gitignore(&self.root)?;
+        config.git = true;
+        crate::atomic::write_atomic(&self.root.join(STORE_FILE), &to_file_bytes(&config))?;
+        commit_worktree(&self.root, subject)?;
+        Ok(())
+    }
+
+    pub fn set_commit_mode(&self, mode: CommitMode) -> Result<()> {
+        let _lock = self.begin_write()?;
+        let mut config = read_config(&self.root)?;
+        if config.commit == mode {
+            return Ok(());
+        }
+        let previous = config.commit;
+        config.commit = mode;
+        let subject = "meta store: set commit";
+        self.commit_admin(
+            subject,
+            vec![JournalEntry::write(
+                STORE_FILE.to_owned(),
+                &to_file_bytes(&config),
+                None,
+            )],
+        )?;
+        if config.git && previous == CommitMode::Manual {
+            self.commit_pending(Some(subject), None)?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(&self, message: Option<&str>, actor: Option<&str>) -> Result<Option<CommitId>> {
+        let _lock = self.begin_write()?;
+        if !read_config(&self.root)?.git {
+            return Err(git_disabled());
+        }
+        self.commit_pending(message, actor)
+    }
+
+    fn commit_pending(
+        &self,
+        message: Option<&str>,
+        actor: Option<&str>,
+    ) -> Result<Option<CommitId>> {
+        let repo = open(&self.root)?;
+        let committed: HashSet<String> = match head_id(&repo)? {
+            Some(head) => commit::tx_ids_of(&repo, head)?.into_iter().collect(),
+            None => HashSet::new(),
+        };
+        let pending: Vec<PendingTx> = pending::read(&self.root)?
+            .into_iter()
+            .filter(|entry| !committed.contains(&entry.tx_id))
+            .collect();
+        let changes = commit::worktree_changes(&self.root)?;
+        if changes.is_empty() {
+            pending::clear(&self.root)?;
+            return Ok(None);
+        }
+        let actor = resolve_actor(&repo, actor);
+        let fallback_tx_id = new_id();
+        let lines: Vec<message::PendingLine<'_>> = pending
+            .iter()
+            .map(|entry| message::PendingLine {
+                tx_id: &entry.tx_id,
+                op_count: entry.ops.len(),
+            })
+            .collect();
+        let text = message::manual_message(message, &lines, &fallback_tx_id, &actor);
+        let tx_id = lines
+            .first()
+            .map_or(fallback_tx_id.as_str(), |line| line.tx_id);
+        let id = commit::commit_changes(&self.root, &changes, &text, tx_id)?;
+        pending::clear(&self.root)?;
+        Ok(Some(id.to_string()))
+    }
+
+    pub(crate) fn git_status(&self) -> Result<GitStatus> {
+        let config = read_config(&self.root)?;
+        let mut status = GitStatus {
+            enabled: config.git,
+            commit: config.commit,
+            branch: config.branch.clone(),
+            head: None,
+            pending_txs: 0,
+            pending_paths: 0,
+        };
+        if !config.git || !self.root.join(GIT_DIR).exists() {
+            return Ok(status);
+        }
+        let repo = open(&self.root)?;
+        status.head = head_id(&repo)?.map(|id| id.to_string());
+        if config.commit == CommitMode::Manual {
+            status.pending_txs =
+                u64::try_from(pending::read(&self.root)?.len()).unwrap_or(u64::MAX);
+            status.pending_paths =
+                u64::try_from(commit::worktree_changes(&self.root)?.len()).unwrap_or(u64::MAX);
+        }
+        Ok(status)
+    }
+
+    pub(crate) fn git_warning(&self) -> Result<Option<(PathBuf, Value)>> {
+        Ok(read_warning(&self.root)?.map(|warning| {
+            (
+                self.root.join(GIT_DIR),
+                serde_json::json!({ "ids": warning.ids, "at": warning.at, "head": warning.head }),
+            )
+        }))
+    }
+}

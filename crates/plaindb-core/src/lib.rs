@@ -3,6 +3,7 @@ pub mod atomic;
 pub mod codec;
 pub mod config;
 pub mod error;
+pub mod git;
 mod hooks;
 pub mod index;
 pub mod journal;
@@ -25,6 +26,8 @@ pub use config::{
     STORE_FORMAT, StoreConfig,
 };
 pub use error::{Error, ErrorCode, Result};
+pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry};
+pub use jiff::Timestamp;
 pub use lock::WriteLock;
 pub use names::{new_id, validate_collection_name, validate_db_name, validate_id};
 pub use query::{Cond, Dir, Filter, FindResult, Query};

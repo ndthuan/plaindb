@@ -12,6 +12,7 @@ use crate::atomic::{
     write_atomic,
 };
 use crate::error::{Error, ErrorCode, Result};
+use crate::git::{PendingTx, commit_journal};
 use crate::hooks;
 use crate::scan::{GENERATION_FILE, read_generation};
 use crate::store::STATE_DIR;
@@ -118,6 +119,12 @@ pub(crate) struct Journal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<TxResult>,
     pub entries: Vec<JournalEntry>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub commit_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_tx: Option<PendingTx>,
 }
 
 fn invalid_journal(message: impl Into<String>) -> Error {
@@ -131,6 +138,9 @@ fn journal_path(root: &Path) -> PathBuf {
 fn finish(root: &Path, journal: &Journal) -> Result<()> {
     if let Some(result) = &journal.result {
         txlog::record(root, result)?;
+    }
+    if let Some(pending) = &journal.pending_tx {
+        crate::git::append_pending(root, pending)?;
     }
     if read_generation(root)? < journal.generation {
         replace_unsynced(
@@ -149,6 +159,10 @@ pub(crate) fn commit(root: &Path, journal: &Journal) -> Result<()> {
     hooks::after_journal();
     hooks::after_files(0);
     apply_all(root, journal, hooks::after_files)?;
+    if journal.commit_pending {
+        hooks::before_git_commit();
+        commit_journal(root, journal)?;
+    }
     finish(root, journal)
 }
 
@@ -170,6 +184,9 @@ pub(crate) fn recover(root: &Path) -> Result<bool> {
         }
     }
     apply_all(root, &journal, |_| {})?;
+    if journal.commit_pending {
+        commit_journal(root, &journal)?;
+    }
     finish(root, &journal)?;
     Ok(true)
 }

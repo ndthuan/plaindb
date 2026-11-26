@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use serde_json::Value;
 
 use crate::atomic::{ensure_dir, write_atomic};
 use crate::codec::Doc;
@@ -12,6 +13,7 @@ use crate::config::{
     CollectionMeta, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
 };
 use crate::error::{Error, ErrorCode, Result};
+use crate::git;
 use crate::journal;
 use crate::lock::WriteLock;
 use crate::names::{validate_collection_name, validate_db_name, validate_id};
@@ -59,6 +61,32 @@ pub(crate) fn child_directories(
     Ok(names)
 }
 
+pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
+    let bytes = match fs::read(root.join(STORE_FILE)) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            return Err(
+                Error::new(ErrorCode::NotAStore, "the directory holds no store")
+                    .with_detail("reason", "missing_store_file"),
+            );
+        }
+        Err(source) => return Err(source.into()),
+    };
+    let config: StoreConfig = from_file_bytes(&bytes).map_err(|source| {
+        Error::new(ErrorCode::NotAStore, source.message)
+            .with_detail("reason", "unreadable_store_file")
+    })?;
+    if config.format > STORE_FORMAT {
+        return Err(Error::new(
+            ErrorCode::UnsupportedFormat,
+            "the store format is newer than this build",
+        )
+        .with_detail("found", config.format)
+        .with_detail("supported", STORE_FORMAT));
+    }
+    Ok(config)
+}
+
 impl Store {
     pub fn init(dir: impl AsRef<Path>) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
@@ -100,30 +128,10 @@ impl Store {
 
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
-        let bytes = match fs::read(root.join(STORE_FILE)) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == ErrorKind::NotFound => {
-                return Err(
-                    Error::new(ErrorCode::NotAStore, "the directory holds no store")
-                        .with_detail("reason", "missing_store_file"),
-                );
-            }
-            Err(source) => return Err(source.into()),
-        };
-        let config: StoreConfig = from_file_bytes(&bytes).map_err(|source| {
-            Error::new(ErrorCode::NotAStore, source.message)
-                .with_detail("reason", "unreadable_store_file")
-        })?;
-        if config.format > STORE_FORMAT {
-            return Err(Error::new(
-                ErrorCode::UnsupportedFormat,
-                "the store format is newer than this build",
-            )
-            .with_detail("found", config.format)
-            .with_detail("supported", STORE_FORMAT));
-        }
+        let config = read_config(&root)?;
         if let Some(_lock) = WriteLock::try_acquire(&root)? {
             journal::recover(&root)?;
+            git::prepare_write(&root)?;
         }
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
         Ok(Self {
@@ -277,7 +285,17 @@ impl Store {
             warnings: Vec::new(),
             documents: 0,
             store_bytes: 0,
+            git: self.git_status()?,
         };
+        if let Some((path, details)) = self.git_warning()? {
+            status.warnings.push(Warning {
+                code: git::FOREIGN_COMMIT_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path,
+                details,
+            });
+        }
         for (db, db_snapshot) in snapshot.dbs.iter() {
             for (collection, collection_snapshot) in db_snapshot.collections.iter() {
                 for (name, entry) in collection_snapshot.files.iter() {
@@ -306,6 +324,7 @@ impl Store {
                                     db: db.clone(),
                                     collection: collection.clone(),
                                     path,
+                                    details: Value::Null,
                                 });
                             }
                         }
@@ -322,6 +341,7 @@ impl Store {
                             db: db.clone(),
                             collection: collection.clone(),
                             path: path.clone(),
+                            details: Value::Null,
                         }),
                     }
                 }

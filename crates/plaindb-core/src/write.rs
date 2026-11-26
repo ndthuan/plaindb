@@ -8,13 +8,14 @@ use serde_json::{Value, json};
 
 use crate::codec::{Doc, codec_for};
 use crate::error::{Error, ErrorCode, Result};
+use crate::git;
 use crate::index::PendingWrite;
-use crate::journal::{self, Journal, JournalEntry};
+use crate::journal::{self, JournalEntry};
 use crate::lock::WriteLock;
 use crate::names::{new_id, validate_collection_name, validate_db_name, validate_id};
 use crate::scan::{self, FileRef, SYSTEM_FIELDS, compile_validator, find_case_duplicates};
 use crate::snapshot::{CollectionSnapshot, DocEntry, FileEntry, Outcome, Snapshot};
-use crate::store::Store;
+use crate::store::{Store, read_config};
 use crate::txlog;
 use crate::version::version_of;
 
@@ -552,8 +553,9 @@ impl Store {
     pub(crate) fn begin_write(&self) -> Result<WriteLock> {
         let lock = WriteLock::acquire(&self.root, self.lock_timeout())?;
         journal::recover(&self.root)?;
+        let foreign = git::prepare_write(&self.root)?;
         let current = self.snapshot.load_full();
-        if scan::read_generation(&self.root)? != current.generation {
+        if foreign || scan::read_generation(&self.root)? != current.generation {
             self.snapshot
                 .store(Arc::new(scan::rescan(&self.root, &current)?));
         }
@@ -616,12 +618,16 @@ impl Store {
                 None => JournalEntry::remove(target.relative_path(), target.base.clone()),
             })
             .collect();
-        let journal = Journal {
-            tx_id: result.tx_id.clone(),
-            generation,
-            result: Some(result.clone()),
-            entries,
-        };
+        let plan = git::plan_tx(
+            &self.root,
+            &read_config(&self.root)?,
+            &result.tx_id,
+            tx.actor.as_deref(),
+            &tx.ops,
+            &result.results,
+        )?;
+        let mut journal = plan.into_journal(result.tx_id.clone(), generation, entries);
+        journal.result = Some(result.clone());
         journal::commit(&self.root, &journal)?;
         self.publish(&snapshot, generation, &targets)?;
         Ok(result)

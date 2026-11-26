@@ -13,6 +13,7 @@ testgen = []
 [dependencies]
 arc-swap = "1.9.5"
 base64 = "0.23.1"
+gix = { version = "0.91.0", default-features = false, features = ["sha1", "index", "revision"] }
 jiff = { version = "1.0.3", default-features = false, features = ["std"] }
 json-patch = { version = "5.0.0", default-features = false }
 jsonschema = { version = "0.63.1", default-features = false }

@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
+use serde_json::Value;
 
 use crate::codec::Doc;
 use crate::config::{CollectionMeta, Format};
+use crate::git::GitStatus;
 use crate::index::Indexes;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +121,7 @@ pub struct Warning {
     pub db: String,
     pub collection: String,
     pub path: PathBuf,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,4 +130,5 @@ pub struct Status {
     pub warnings: Vec<Warning>,
     pub documents: u64,
     pub store_bytes: u64,
+    pub git: GitStatus,
 }
