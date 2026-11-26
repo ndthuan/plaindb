@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
+use std::sync::Arc;
 
-use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
+use roaring::RoaringBitmap;
+use rpds::{RedBlackTreeMapSync, VectorSync};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,7 +16,8 @@ use crate::snapshot::{CollectionSnapshot, FileEntry, Outcome};
 use crate::text::{TextFields, doc_tokens, tokens};
 
 pub type PendingWrite<'a> = (&'a str, Option<&'a Doc>);
-pub type IdSet = RedBlackTreeSetSync<String>;
+pub type Postings = Arc<RoaringBitmap>;
+type PostingMap<K> = RedBlackTreeMapSync<K, Postings>;
 
 #[derive(Serialize, Deserialize)]
 pub struct FieldDump {
@@ -28,27 +31,115 @@ pub struct IndexDump {
     pub text: Option<Vec<(String, Vec<u32>)>>,
 }
 
-fn ordinals(set: &IdSet, lookup: &HashMap<&str, u32>) -> Vec<u32> {
+#[derive(Debug, Clone)]
+pub struct Ordinals {
+    by_id: RedBlackTreeMapSync<Arc<str>, u32>,
+    ids: VectorSync<Option<Arc<str>>>,
+    free: VectorSync<u32>,
+}
+
+impl Default for Ordinals {
+    fn default() -> Self {
+        Self {
+            by_id: RedBlackTreeMapSync::new_sync(),
+            ids: VectorSync::new_sync(),
+            free: VectorSync::new_sync(),
+        }
+    }
+}
+
+impl Ordinals {
+    fn listed(ids: &[&str]) -> Self {
+        let mut ordinals = Self::default();
+        for id in ids {
+            ordinals.assign(id);
+        }
+        ordinals
+    }
+
+    pub fn of(&self, id: &str) -> Option<u32> {
+        self.by_id.get(id).copied()
+    }
+
+    pub fn id(&self, ordinal: u32) -> Option<&str> {
+        self.ids.get(usize::try_from(ordinal).ok()?)?.as_deref()
+    }
+
+    pub fn ids(&self, set: &RoaringBitmap) -> Vec<String> {
+        set.iter()
+            .filter_map(|ordinal| self.id(ordinal).map(str::to_owned))
+            .collect()
+    }
+
+    fn assign(&mut self, id: &str) -> u32 {
+        if let Some(known) = self.of(id) {
+            return known;
+        }
+        let shared: Arc<str> = Arc::from(id);
+        let ordinal = match self.free.last().copied() {
+            Some(reused) => {
+                self.free.drop_last_mut();
+                self.ids.set_mut(reused as usize, Some(Arc::clone(&shared)));
+                reused
+            }
+            None => {
+                let next = u32::try_from(self.ids.len()).unwrap_or(u32::MAX);
+                self.ids.push_back_mut(Some(Arc::clone(&shared)));
+                next
+            }
+        };
+        self.by_id.insert_mut(shared, ordinal);
+        ordinal
+    }
+
+    fn release(&mut self, id: &str) {
+        let Some(ordinal) = self.of(id) else {
+            return;
+        };
+        self.by_id.remove_mut(id);
+        self.ids.set_mut(ordinal as usize, None);
+        self.free.push_back_mut(ordinal);
+    }
+}
+
+fn add_posting<K: Ord + Clone>(map: &mut PostingMap<K>, key: K, ordinal: u32) {
+    match map.get_mut(&key) {
+        Some(set) => {
+            Arc::make_mut(set).insert(ordinal);
+        }
+        None => map.insert_mut(key, Arc::new(RoaringBitmap::from_iter([ordinal]))),
+    }
+}
+
+fn remove_posting<K: Ord + Clone>(map: &mut PostingMap<K>, key: &K, ordinal: u32) {
+    let emptied = match map.get(key) {
+        Some(set) if set.contains(ordinal) => set.len() == 1,
+        _ => return,
+    };
+    if emptied {
+        map.remove_mut(key);
+    } else if let Some(set) = map.get_mut(key) {
+        Arc::make_mut(set).remove(ordinal);
+    }
+}
+
+fn postings(ordinals: &[u32]) -> Postings {
+    Arc::new(ordinals.iter().copied().collect())
+}
+
+fn positions(set: &RoaringBitmap, ordinals: &Ordinals, lookup: &HashMap<&str, u32>) -> Vec<u32> {
     set.iter()
-        .filter_map(|id| lookup.get(id.as_str()).copied())
+        .filter_map(|ordinal| ordinals.id(ordinal))
+        .filter_map(|id| lookup.get(id).copied())
         .collect()
 }
 
-fn restored_set(ordinals: &[u32], ids: &[&str]) -> Option<IdSet> {
-    let mut set = IdSet::new_sync();
-    for ordinal in ordinals {
-        let id = ids.get(usize::try_from(*ordinal).ok()?)?;
-        set.insert_mut((*id).to_owned());
-    }
-    Some(set)
-}
-
-fn id_set(ids: &[&str]) -> IdSet {
-    let mut set = IdSet::new_sync();
-    for id in ids {
-        set.insert_mut((*id).to_owned());
-    }
-    set
+fn restored(positions: &[u32], count: usize) -> Option<Postings> {
+    let limit = u32::try_from(count).ok()?;
+    positions
+        .iter()
+        .all(|position| *position < limit)
+        .then(|| postings(positions))
 }
 
 #[derive(Debug, Clone)]
@@ -57,8 +148,8 @@ pub struct FieldIndex {
     pub path: Vec<String>,
     pub unique: bool,
     pub multi: bool,
-    entries: RedBlackTreeMapSync<Key, IdSet>,
-    unindexed: IdSet,
+    entries: PostingMap<Key>,
+    unindexed: Postings,
 }
 
 pub enum Keys {
@@ -74,7 +165,7 @@ impl FieldIndex {
             unique,
             multi,
             entries: RedBlackTreeMapSync::new_sync(),
-            unindexed: IdSet::new_sync(),
+            unindexed: Postings::default(),
         })
     }
 
@@ -89,83 +180,77 @@ impl FieldIndex {
         Keys::Some(found.into_iter().cloned().collect())
     }
 
-    fn add(&mut self, id: &str, doc: &Doc) {
-        match self.keys_for(doc) {
-            Keys::Refused => self.unindexed.insert_mut(id.to_owned()),
-            Keys::Some(keys) => {
-                for key in keys {
-                    let mut ids = self
-                        .entries
-                        .get(&Key(key.clone()))
-                        .cloned()
-                        .unwrap_or_else(IdSet::new_sync);
-                    ids.insert_mut(id.to_owned());
-                    self.entries.insert_mut(Key(key), ids);
-                }
-            }
-        }
-    }
-
-    fn bulk(&mut self, docs: &[(&str, &Doc)]) {
-        let mut grouped: BTreeMap<Key, Vec<&str>> = BTreeMap::new();
-        for (id, doc) in docs {
-            match self.keys_for(doc) {
-                Keys::Refused => self.unindexed.insert_mut((*id).to_owned()),
-                Keys::Some(keys) => {
-                    for key in keys {
-                        grouped.entry(Key(key)).or_default().push(id);
-                    }
-                }
-            }
-        }
-        for (key, ids) in grouped {
-            self.entries.insert_mut(key, id_set(&ids));
-        }
-    }
-
-    fn remove(&mut self, id: &str, doc: &Doc) {
+    fn add(&mut self, ordinal: u32, doc: &Doc) {
         match self.keys_for(doc) {
             Keys::Refused => {
-                self.unindexed.remove_mut(id);
+                Arc::make_mut(&mut self.unindexed).insert(ordinal);
             }
             Keys::Some(keys) => {
                 for key in keys {
-                    let key = Key(key);
-                    let Some(mut ids) = self.entries.get(&key).cloned() else {
-                        continue;
-                    };
-                    ids.remove_mut(id);
-                    if ids.is_empty() {
-                        self.entries.remove_mut(&key);
-                    } else {
-                        self.entries.insert_mut(key, ids);
-                    }
+                    add_posting(&mut self.entries, Key(key), ordinal);
                 }
             }
         }
     }
 
-    pub fn exact(&self, value: &Value) -> Vec<String> {
+    fn bulk(&mut self, docs: &[(u32, &Doc)]) {
+        let mut grouped: BTreeMap<Key, Vec<u32>> = BTreeMap::new();
+        let mut unindexed = Vec::new();
+        for (ordinal, doc) in docs {
+            match self.keys_for(doc) {
+                Keys::Refused => unindexed.push(*ordinal),
+                Keys::Some(keys) => {
+                    for key in keys {
+                        grouped.entry(Key(key)).or_default().push(*ordinal);
+                    }
+                }
+            }
+        }
+        for (key, ordinals) in grouped {
+            self.entries.insert_mut(key, postings(&ordinals));
+        }
+        self.unindexed = postings(&unindexed);
+    }
+
+    fn remove(&mut self, ordinal: u32, doc: &Doc) {
+        match self.keys_for(doc) {
+            Keys::Refused => {
+                if self.unindexed.contains(ordinal) {
+                    Arc::make_mut(&mut self.unindexed).remove(ordinal);
+                }
+            }
+            Keys::Some(keys) => {
+                for key in keys {
+                    remove_posting(&mut self.entries, &Key(key), ordinal);
+                }
+            }
+        }
+    }
+
+    pub fn exact(&self, value: &Value) -> RoaringBitmap {
         self.entries
             .get(&Key(value.clone()))
-            .map(|ids| ids.iter().cloned().collect())
+            .map(|set| RoaringBitmap::clone(set))
             .unwrap_or_default()
     }
 
-    pub fn range(&self, from: Bound<Value>, to: Bound<Value>) -> Vec<String> {
+    pub fn range(&self, from: Bound<Value>, to: Bound<Value>) -> RoaringBitmap {
         let wrap = |bound: Bound<Value>| match bound {
             Bound::Included(value) => Bound::Included(Key(value)),
             Bound::Excluded(value) => Bound::Excluded(Key(value)),
             Bound::Unbounded => Bound::Unbounded,
         };
-        self.entries
-            .range((wrap(from), wrap(to)))
-            .flat_map(|(_, ids)| ids.iter().cloned())
-            .collect()
+        let mut found = RoaringBitmap::new();
+        for (_, set) in self.entries.range((wrap(from), wrap(to))) {
+            found |= set.as_ref();
+        }
+        found
     }
 
-    pub fn prefix(&self, prefix: &str) -> Vec<String> {
-        self.entries
+    pub fn prefix(&self, prefix: &str) -> RoaringBitmap {
+        let mut found = RoaringBitmap::new();
+        for (_, set) in self
+            .entries
             .range((
                 Bound::Included(Key(Value::String(prefix.to_owned()))),
                 Bound::Unbounded,
@@ -173,82 +258,70 @@ impl FieldIndex {
             .take_while(
                 |(key, _)| matches!(&key.0, Value::String(text) if text.starts_with(prefix)),
             )
-            .flat_map(|(_, ids)| ids.iter().cloned())
-            .collect()
+        {
+            found |= set.as_ref();
+        }
+        found
     }
 
-    pub fn unindexed(&self) -> Vec<String> {
-        self.unindexed.iter().cloned().collect()
+    pub fn unindexed(&self) -> &RoaringBitmap {
+        &self.unindexed
     }
 
-    fn duplicates(&self) -> Vec<(Value, Vec<String>)> {
+    fn duplicates(&self) -> Option<(&Value, &RoaringBitmap)> {
         self.entries
             .iter()
-            .filter(|(_, ids)| ids.size() > 1)
-            .map(|(key, ids)| (key.0.clone(), ids.iter().cloned().collect()))
-            .collect()
+            .find(|(_, set)| set.len() > 1)
+            .map(|(key, set)| (&key.0, set.as_ref()))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TextIndex {
     pub fields: TextFields,
-    entries: RedBlackTreeMapSync<String, IdSet>,
+    entries: PostingMap<String>,
 }
 
 impl TextIndex {
-    fn add(&mut self, id: &str, doc: &Doc) {
-        for token in doc_tokens(doc, &self.fields) {
-            let mut ids = self
-                .entries
-                .get(&token)
-                .cloned()
-                .unwrap_or_else(IdSet::new_sync);
-            ids.insert_mut(id.to_owned());
-            self.entries.insert_mut(token, ids);
-        }
-    }
-
-    fn bulk(&mut self, docs: &[(&str, &Doc)]) {
-        let mut grouped: HashMap<String, Vec<&str>> = HashMap::new();
-        for (id, doc) in docs {
+    fn bulk(&mut self, docs: &[(u32, &Doc)]) {
+        let mut grouped: HashMap<String, Vec<u32>> = HashMap::new();
+        for (ordinal, doc) in docs {
             for token in doc_tokens(doc, &self.fields) {
-                grouped.entry(token).or_default().push(id);
+                grouped.entry(token).or_default().push(*ordinal);
             }
         }
-        for (token, ids) in grouped {
-            self.entries.insert_mut(token, id_set(&ids));
+        for (token, ordinals) in grouped {
+            self.entries.insert_mut(token, postings(&ordinals));
         }
     }
 
-    fn remove(&mut self, id: &str, doc: &Doc) {
-        for token in doc_tokens(doc, &self.fields) {
-            let Some(mut ids) = self.entries.get(&token).cloned() else {
-                continue;
-            };
-            ids.remove_mut(id);
-            if ids.is_empty() {
-                self.entries.remove_mut(&token);
-            } else {
-                self.entries.insert_mut(token, ids);
-            }
+    fn replace(&mut self, ordinal: u32, old: Option<&Doc>, new: Option<&Doc>) {
+        let before = old
+            .map(|doc| doc_tokens(doc, &self.fields))
+            .unwrap_or_default();
+        let after = new
+            .map(|doc| doc_tokens(doc, &self.fields))
+            .unwrap_or_default();
+        for token in before.difference(&after) {
+            remove_posting(&mut self.entries, token, ordinal);
+        }
+        for token in after.difference(&before) {
+            add_posting(&mut self.entries, token.clone(), ordinal);
         }
     }
 
-    pub fn matching(&self, query: &str) -> Vec<String> {
-        let mut found: Option<BTreeSet<String>> = None;
+    pub fn matching(&self, query: &str) -> RoaringBitmap {
+        let mut found: Option<RoaringBitmap> = None;
         for token in tokens(query) {
-            let ids: BTreeSet<String> = self
-                .entries
-                .get(&token)
-                .map(|ids| ids.iter().cloned().collect())
-                .unwrap_or_default();
+            let Some(set) = self.entries.get(&token) else {
+                return RoaringBitmap::new();
+            };
             found = Some(match found {
-                Some(known) => known.intersection(&ids).cloned().collect(),
-                None => ids,
+                Some(known) => known & set.as_ref(),
+                None => RoaringBitmap::clone(set),
             });
         }
-        found.unwrap_or_default().into_iter().collect()
+        found.unwrap_or_default()
     }
 }
 
@@ -256,6 +329,7 @@ impl TextIndex {
 pub struct Indexes {
     pub fields: Vec<FieldIndex>,
     pub text: Option<TextIndex>,
+    pub ordinals: Ordinals,
 }
 
 fn invalid_index(field: &str) -> Error {
@@ -299,6 +373,7 @@ fn doc_of(entry: &FileEntry) -> Option<&Doc> {
 
 impl Indexes {
     pub fn dump(&self, lookup: &HashMap<&str, u32>) -> IndexDump {
+        let ordinals = &self.ordinals;
         IndexDump {
             fields: self
                 .fields
@@ -307,16 +382,16 @@ impl Indexes {
                     entries: index
                         .entries
                         .iter()
-                        .map(|(key, ids)| (key.0.clone(), ordinals(ids, lookup)))
+                        .map(|(key, set)| (key.0.clone(), positions(set, ordinals, lookup)))
                         .collect(),
-                    unindexed: ordinals(&index.unindexed, lookup),
+                    unindexed: positions(&index.unindexed, ordinals, lookup),
                 })
                 .collect(),
             text: self.text.as_ref().map(|index| {
                 index
                     .entries
                     .iter()
-                    .map(|(token, ids)| (token.clone(), ordinals(ids, lookup)))
+                    .map(|(token, set)| (token.clone(), positions(set, ordinals, lookup)))
                     .collect()
             }),
         }
@@ -330,19 +405,22 @@ impl Indexes {
             return None;
         }
         for (index, saved) in indexes.fields.iter_mut().zip(dump.fields) {
-            for (value, ordinals) in saved.entries {
+            for (value, positions) in saved.entries {
                 index
                     .entries
-                    .insert_mut(Key(value), restored_set(&ordinals, ids)?);
+                    .insert_mut(Key(value), restored(&positions, ids.len())?);
             }
-            index.unindexed = restored_set(&saved.unindexed, ids)?;
+            index.unindexed = restored(&saved.unindexed, ids.len())?;
         }
         if let (Some(index), Some(saved)) = (&mut indexes.text, dump.text) {
-            for (token, ordinals) in saved {
+            for (token, positions) in saved {
                 index
                     .entries
-                    .insert_mut(token, restored_set(&ordinals, ids)?);
+                    .insert_mut(token, restored(&positions, ids.len())?);
             }
+        }
+        if indexes.tracks() {
+            indexes.ordinals = Ordinals::listed(ids);
         }
         Some(indexes)
     }
@@ -376,7 +454,15 @@ impl Indexes {
             fields,
             entries: RedBlackTreeMapSync::new_sync(),
         });
-        Ok(Self { fields, text })
+        Ok(Self {
+            fields,
+            text,
+            ordinals: Ordinals::default(),
+        })
+    }
+
+    fn tracks(&self) -> bool {
+        !self.fields.is_empty() || self.text.is_some()
     }
 
     pub fn build<'a>(
@@ -384,8 +470,14 @@ impl Indexes {
         files: impl Iterator<Item = &'a FileEntry>,
     ) -> Result<Self> {
         let mut indexes = Self::empty(meta)?;
-        let docs: Vec<(&str, &Doc)> = files
-            .filter_map(|entry| doc_of(entry).map(|doc| (entry.id.as_str(), doc)))
+        if !indexes.tracks() {
+            return Ok(indexes);
+        }
+        let docs: Vec<(u32, &Doc)> = files
+            .filter_map(|entry| {
+                let doc = doc_of(entry)?;
+                Some((indexes.ordinals.assign(&entry.id), doc))
+            })
             .collect();
         for index in &mut indexes.fields {
             index.bulk(&docs);
@@ -397,34 +489,51 @@ impl Indexes {
     }
 
     pub fn apply(&mut self, old: Option<&FileEntry>, new: Option<&FileEntry>) {
-        for index in &mut self.fields {
-            if let Some(old) = old
-                && let Some(doc) = doc_of(old)
-            {
-                index.remove(&old.id, doc);
+        if !self.tracks() {
+            return;
+        }
+        let old_doc = old.and_then(|entry| doc_of(entry).map(|doc| (entry.id.as_str(), doc)));
+        let new_doc = new.and_then(|entry| doc_of(entry).map(|doc| (entry.id.as_str(), doc)));
+        let old_ordinal = old_doc.and_then(|(id, doc)| Some((self.ordinals.of(id)?, doc)));
+        if let Some((ordinal, doc)) = old_ordinal {
+            for index in &mut self.fields {
+                index.remove(ordinal, doc);
             }
-            if let Some(new) = new
-                && let Some(doc) = doc_of(new)
-            {
-                index.add(&new.id, doc);
+        }
+        let same =
+            matches!((old_doc, new_doc), (Some((left, _)), Some((right, _))) if left == right);
+        if !same && let Some(entry) = old {
+            self.ordinals.release(&entry.id);
+        }
+        let new_ordinal = new_doc.map(|(id, doc)| (self.ordinals.assign(id), doc));
+        if let Some((ordinal, doc)) = new_ordinal {
+            for index in &mut self.fields {
+                index.add(ordinal, doc);
             }
         }
         if let Some(index) = &mut self.text {
-            if let Some(old) = old
-                && let Some(doc) = doc_of(old)
-            {
-                index.remove(&old.id, doc);
-            }
-            if let Some(new) = new
-                && let Some(doc) = doc_of(new)
-            {
-                index.add(&new.id, doc);
+            match (old_ordinal, new_ordinal) {
+                (Some((before, old)), Some((after, new))) if before == after => {
+                    index.replace(after, Some(old), Some(new));
+                }
+                _ => {
+                    if let Some((ordinal, doc)) = old_ordinal {
+                        index.replace(ordinal, Some(doc), None);
+                    }
+                    if let Some((ordinal, doc)) = new_ordinal {
+                        index.replace(ordinal, None, Some(doc));
+                    }
+                }
             }
         }
     }
 
     pub fn for_path(&self, path: &[String]) -> Option<&FieldIndex> {
         self.fields.iter().find(|index| index.path == path)
+    }
+
+    pub fn ids(&self, set: &RoaringBitmap) -> Vec<String> {
+        self.ordinals.ids(set)
     }
 
     pub fn validate_new<'a>(
@@ -436,12 +545,18 @@ impl Indexes {
         let built = Self::build(meta, files)?;
         for index in &built.fields {
             if !index.unindexed.is_empty() {
-                return Err(array_refused(&index.field, index.unindexed()));
+                return Err(array_refused(&index.field, built.ids(&index.unindexed)));
             }
             if index.unique
-                && let Some((value, ids)) = index.duplicates().into_iter().next()
+                && let Some((value, set)) = index.duplicates()
             {
-                return Err(unique_violation(db, coll, &index.field, &value, ids));
+                return Err(unique_violation(
+                    db,
+                    coll,
+                    &index.field,
+                    value,
+                    built.ids(set),
+                ));
             }
         }
         Ok(())
@@ -471,10 +586,9 @@ impl Indexes {
             for (key, mut ids) in incoming {
                 if let Some(existing) = index.entries.get(&key) {
                     ids.extend(
-                        existing
-                            .iter()
-                            .filter(|id| !touched.contains(id.as_str()))
-                            .cloned(),
+                        self.ids(existing)
+                            .into_iter()
+                            .filter(|id| !touched.contains(id.as_str())),
                     );
                 }
                 if ids.len() > 1 {

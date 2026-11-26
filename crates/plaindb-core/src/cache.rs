@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::Cursor;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,9 +8,9 @@ use rpds::RedBlackTreeMapSync;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use crate::atomic::write_atomic_at;
+use crate::atomic::replace_unsynced_by;
 use crate::codec::Doc;
-use crate::config::{CollectionMeta, Durability, from_file_bytes};
+use crate::config::{CollectionMeta, from_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::index::{IndexDump, Indexes};
 use crate::names::{validate_collection_name, validate_db_name};
@@ -133,9 +133,12 @@ fn cache_path(root: &Path) -> PathBuf {
     root.join(STATE_DIR).join(CACHE_FILE)
 }
 
+fn open_cache(root: &Path) -> Option<BufReader<File>> {
+    File::open(cache_path(root)).ok().map(BufReader::new)
+}
+
 pub fn stored_generation(root: &Path) -> Option<u64> {
-    let bytes = fs::read(cache_path(root)).ok()?;
-    let header: Header = rmp_serde::decode::from_read(Cursor::new(bytes)).ok()?;
+    let header: Header = rmp_serde::decode::from_read(open_cache(root)?).ok()?;
     (header.format == CACHE_FORMAT).then_some(header.generation)
 }
 
@@ -150,10 +153,9 @@ pub(crate) enum CacheRead {
 }
 
 pub(crate) fn read(root: &Path) -> CacheRead {
-    let Ok(bytes) = fs::read(cache_path(root)) else {
+    let Some(mut reader) = open_cache(root) else {
         return CacheRead::Missing;
     };
-    let mut reader = Cursor::new(bytes);
     let Ok(header) = rmp_serde::decode::from_read::<_, Header>(&mut reader) else {
         return CacheRead::Unusable { discard: true };
     };
@@ -169,7 +171,7 @@ pub(crate) fn read(root: &Path) -> CacheRead {
     let Ok(body) = rmp_serde::decode::from_read::<_, Body>(&mut reader) else {
         return CacheRead::Unusable { discard: true };
     };
-    if reader.position() != reader.get_ref().len() as u64 {
+    if !reader.fill_buf().is_ok_and(<[u8]>::is_empty) {
         return CacheRead::Unusable { discard: true };
     }
     match assemble(root, header.generation, body, metas) {
@@ -285,8 +287,9 @@ fn file_ref<'a>(name: &'a str, entry: &'a FileEntry) -> FileRef<'a> {
     }
 }
 
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    rmp_serde::to_vec(value).map_err(|source| Error::new(ErrorCode::Io, source.to_string()))
+fn encode<T: Serialize>(out: &mut impl Write, value: &T) -> Result<()> {
+    rmp_serde::encode::write(out, value)
+        .map_err(|source| Error::new(ErrorCode::Io, source.to_string()))
 }
 
 pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
@@ -325,9 +328,12 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
         generation: snapshot.generation,
         meta_hash,
     };
-    let mut bytes = encode(&header)?;
-    bytes.extend(encode(&BodyRef { collections })?);
-    write_atomic_at(&cache_path(root), &bytes, Durability::Off)
+    replace_unsynced_by(&cache_path(root), |file| {
+        let mut out = BufWriter::new(file);
+        encode(&mut out, &header)?;
+        encode(&mut out, &BodyRef { collections })?;
+        Ok(out.flush()?)
+    })
 }
 
 pub fn same_files(left: &Snapshot, right: &Snapshot) -> bool {

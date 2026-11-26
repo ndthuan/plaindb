@@ -118,12 +118,21 @@ fn temp_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn replace_with(path: &Path, bytes: &[u8], durability: Durability, ordered: bool) -> Result<()> {
+    replace_by(path, durability, ordered, |file| Ok(file.write_all(bytes)?))
+}
+
+fn replace_by(
+    path: &Path,
+    durability: Durability,
+    ordered: bool,
+    fill: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     let dir_durability = if ordered { Durability::Off } else { durability };
     ensure_dir(parent_of(path)?, dir_durability)?;
     let temp = temp_path(path)?;
     let written = (|| -> Result<()> {
         let mut file = File::create(&temp)?;
-        file.write_all(bytes)?;
+        fill(&mut file)?;
         if ordered {
             order(&file, durability)?;
         } else {
@@ -140,6 +149,13 @@ fn replace_with(path: &Path, bytes: &[u8], durability: Durability, ordered: bool
 
 pub(crate) fn replace_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
     replace_with(path, bytes, Durability::Off, false)
+}
+
+pub(crate) fn replace_unsynced_by(
+    path: &Path,
+    fill: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
+    replace_by(path, Durability::Off, false, fill)
 }
 
 pub(crate) fn place(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {

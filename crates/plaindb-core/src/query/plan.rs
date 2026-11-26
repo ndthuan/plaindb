@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
 use std::ops::Bound;
+
+use roaring::RoaringBitmap;
 
 use super::filter::{Cond, Filter};
 use crate::snapshot::CollectionSnapshot;
@@ -15,12 +16,14 @@ fn conjuncts<'a>(filter: &'a Filter, out: &mut Vec<&'a Filter>) {
     }
 }
 
-fn lookup(collection: &CollectionSnapshot, path: &[String], cond: &Cond) -> Option<Vec<String>> {
+fn lookup(collection: &CollectionSnapshot, path: &[String], cond: &Cond) -> Option<RoaringBitmap> {
     let index = collection.indexes.for_path(path)?;
-    let mut ids = match cond {
+    let mut found = match cond {
         Cond::Eq(value) if !value.is_array() => index.exact(value),
         Cond::In(values) if values.iter().all(|value| !value.is_array()) => {
-            values.iter().flat_map(|value| index.exact(value)).collect()
+            values.iter().fold(RoaringBitmap::new(), |found, value| {
+                found | index.exact(value)
+            })
         }
         Cond::Gt(bound) => index.range(Bound::Excluded(bound.clone()), Bound::Unbounded),
         Cond::Gte(bound) => index.range(Bound::Included(bound.clone()), Bound::Unbounded),
@@ -29,8 +32,8 @@ fn lookup(collection: &CollectionSnapshot, path: &[String], cond: &Cond) -> Opti
         Cond::Prefix(prefix) => index.prefix(prefix),
         _ => return None,
     };
-    ids.extend(index.unindexed());
-    Some(ids)
+    found |= index.unindexed();
+    Some(found)
 }
 
 pub(crate) struct Candidates {
@@ -41,13 +44,13 @@ pub(crate) struct Candidates {
 pub(crate) fn candidates(collection: &CollectionSnapshot, filter: &Filter) -> Option<Candidates> {
     let mut parts = Vec::new();
     conjuncts(filter, &mut parts);
-    let (position, ids, exact) =
+    let (position, found, exact) =
         parts
             .iter()
             .enumerate()
             .find_map(|(position, part)| match part {
                 Filter::Field { path, cond } => {
-                    lookup(collection, path, cond).map(|ids| (position, ids, false))
+                    lookup(collection, path, cond).map(|found| (position, found, false))
                 }
                 Filter::Text(query) => collection
                     .indexes
@@ -56,7 +59,6 @@ pub(crate) fn candidates(collection: &CollectionSnapshot, filter: &Filter) -> Op
                     .map(|index| (position, index.matching(query), true)),
                 _ => None,
             })?;
-    let unique: BTreeSet<String> = ids.into_iter().collect();
     let residual = exact.then(|| {
         Filter::And(
             parts
@@ -68,7 +70,7 @@ pub(crate) fn candidates(collection: &CollectionSnapshot, filter: &Filter) -> Op
         )
     });
     Some(Candidates {
-        ids: unique.into_iter().collect(),
+        ids: collection.indexes.ids(&found),
         residual,
     })
 }

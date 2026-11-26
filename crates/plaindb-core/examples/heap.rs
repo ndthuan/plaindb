@@ -81,7 +81,19 @@ fn text_meta(meta: &CollectionMeta) -> CollectionMeta {
     text
 }
 
-fn breakdown(collection: &CollectionSnapshot) -> [(&'static str, u64); 4] {
+fn ordinals_only() -> CollectionMeta {
+    CollectionMeta {
+        format: Format::Json,
+        schema: None,
+        indexes: vec![IndexSpec::Field {
+            field: "absent".to_owned(),
+            unique: false,
+            multi: false,
+        }],
+    }
+}
+
+fn breakdown(collection: &CollectionSnapshot) -> [(&'static str, u64); 5] {
     let documents = measured(|| {
         collection
             .files
@@ -92,6 +104,8 @@ fn breakdown(collection: &CollectionSnapshot) -> [(&'static str, u64); 4] {
             })
             .collect::<Vec<Doc>>()
     });
+    let ordinals =
+        measured(|| Indexes::build(&ordinals_only(), collection.files.values()).expect("ordinals"));
     let fields = measured(|| {
         let meta = meta_with(&collection.meta, |spec| {
             matches!(spec, IndexSpec::Field { .. })
@@ -110,8 +124,9 @@ fn breakdown(collection: &CollectionSnapshot) -> [(&'static str, u64); 4] {
     });
     [
         ("documents", documents),
-        ("field indexes", fields),
-        ("text index", text),
+        ("document ordinals", ordinals),
+        ("field indexes", fields.saturating_sub(ordinals)),
+        ("text index", text.saturating_sub(ordinals)),
         ("file entries", files),
     ]
 }

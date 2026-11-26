@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -180,6 +181,121 @@ fn indexed_and_scanned_results_are_identical() {
             Ok(())
         })
         .unwrap();
+}
+
+fn put(coll: &str, id: &str, value: Value) -> Op {
+    Op::Put {
+        db: "main".to_owned(),
+        coll: coll.to_owned(),
+        id: id.to_owned(),
+        doc: doc(value),
+        if_version: None,
+    }
+}
+
+const WORDS: [&str; 5] = ["red", "green", "blue", "cyan", "gold"];
+
+fn worded_doc(seed: &mut fastrand::Rng) -> Value {
+    let mut value = random_doc(seed);
+    let words: Vec<&str> = (0..seed.usize(0..4))
+        .map(|_| WORDS[seed.usize(0..WORDS.len())])
+        .collect();
+    value["s"] = json!(words.join(" "));
+    value
+}
+
+fn text_ids(model: &BTreeMap<String, Value>, query: &str) -> Vec<String> {
+    model
+        .iter()
+        .filter(|(_, value)| {
+            let words: Vec<&str> = value["s"].as_str().unwrap().split(' ').collect();
+            query.split(' ').all(|word| words.contains(&word))
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+fn compare_with_scan(store: &Store, model: &BTreeMap<String, Value>, cases: u32) {
+    let mut runner = TestRunner::new(Config::with_cases(cases));
+    runner
+        .run(&filter_strategy(), |filter| {
+            let scanned = ids(store, "plain", &filter);
+            let indexed = ids(store, "indexed", &filter);
+            prop_assert_eq!(scanned, indexed, "filter {}", filter);
+            Ok(())
+        })
+        .unwrap();
+    for query in ["red", "blue gold", "cyan green red"] {
+        assert_eq!(
+            ids(store, "indexed", &json!({ "$text": query })),
+            text_ids(model, query),
+            "text {query}"
+        );
+    }
+}
+
+#[test]
+fn indexes_match_a_scan_through_deletes_and_reinserts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = store_with(dir.path(), &["plain", "indexed"]);
+    store
+        .set_indexes(
+            "main",
+            "indexed",
+            vec![
+                plain("a"),
+                multi("t"),
+                plain("n"),
+                plain("m.x"),
+                IndexSpec::Text {
+                    text: vec!["s".to_owned()],
+                },
+            ],
+        )
+        .unwrap();
+    let mut seed = fastrand::Rng::with_seed(11);
+    let mut model: BTreeMap<String, Value> = BTreeMap::new();
+    for round in 0..600 {
+        let mut ops = Vec::new();
+        let mut planned: BTreeMap<String, Option<Value>> = BTreeMap::new();
+        for _ in 0..seed.usize(1..4) {
+            let id = format!("d{:02}", seed.usize(0..60));
+            if planned.contains_key(&id) {
+                continue;
+            }
+            let present = model.contains_key(&id);
+            let next = if present && seed.bool() {
+                None
+            } else {
+                Some(worded_doc(&mut seed))
+            };
+            for coll in ["plain", "indexed"] {
+                ops.push(match (&next, present) {
+                    (None, _) => delete(coll, &id),
+                    (Some(value), true) => put(coll, &id, value.clone()),
+                    (Some(value), false) => insert(coll, &id, value.clone()),
+                });
+            }
+            planned.insert(id, next);
+        }
+        store.apply(Tx::new(ops)).unwrap();
+        for (id, next) in planned {
+            match next {
+                Some(value) => model.insert(id, value),
+                None => model.remove(&id),
+            };
+        }
+        if round % 100 == 99 {
+            compare_with_scan(&store, &model, 40);
+        }
+    }
+    drop(store);
+    store = Store::open(dir.path()).unwrap();
+    compare_with_scan(&store, &model, 100);
+    drop(store);
+    fs::remove_file(dir.path().join(".plaindb").join("index-cache.bin")).unwrap();
+    store = Store::open(dir.path()).unwrap();
+    compare_with_scan(&store, &model, 100);
 }
 
 #[test]
