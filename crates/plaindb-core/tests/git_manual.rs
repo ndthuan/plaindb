@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use plaindb_core::{CommitMode, Doc, ErrorCode, Format, Op, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -37,7 +38,15 @@ fn insert(id: &str, value: Value) -> Op {
 }
 
 fn manual_store(root: &Path) -> Store {
-    let store = Store::init_with_git(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)
@@ -234,7 +243,14 @@ fn a_hand_edit_alone_is_committed_with_a_fresh_transaction_id() {
 #[test]
 fn commit_without_git_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
+    let store = Store::init_with(
+        dir.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     let error = store.commit(None, None).unwrap_err();
     assert_eq!(error.code, ErrorCode::GitDisabled);
 }

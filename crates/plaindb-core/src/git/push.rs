@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{git_disabled, git_error, head_id, open, read_optional, state_file};
 use crate::atomic::{ensure_dir, replace_unsynced};
+use crate::config::Durability;
 use crate::config::{PushMode, StoreConfig, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::store::{STATE_DIR, Store, read_config};
@@ -172,7 +173,7 @@ fn push_with_retries(root: &Path, config: &StoreConfig) -> Result<()> {
 
 fn try_lock(root: &Path) -> Result<Option<File>> {
     let dir = root.join(STATE_DIR);
-    ensure_dir(&dir)?;
+    ensure_dir(&dir, Durability::Full)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)

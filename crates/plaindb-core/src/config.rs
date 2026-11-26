@@ -20,6 +20,25 @@ pub enum PushMode {
     OnCommit,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Durability {
+    #[default]
+    Full,
+    Normal,
+    Off,
+}
+
+impl Durability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Normal => "normal",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Limits {
@@ -38,6 +57,7 @@ pub struct StoreConfig {
     pub remote: String,
     pub branch: String,
     pub lock_timeout_ms: u64,
+    pub durability: Durability,
     pub limits: Limits,
 }
 
@@ -51,6 +71,7 @@ impl Default for StoreConfig {
             remote: "origin".to_owned(),
             branch: "main".to_owned(),
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
+            durability: Durability::Full,
             limits: Limits::default(),
         }
     }

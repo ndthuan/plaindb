@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use plaindb_core::{Doc, Format, Op, Store, Tx, Warning};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -44,7 +45,15 @@ fn put(id: &str, value: Value) -> Op {
 }
 
 fn git_store(root: &Path) -> Store {
-    let store = Store::init_with_git(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)

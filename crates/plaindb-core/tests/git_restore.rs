@@ -6,6 +6,7 @@ use std::process::Command;
 use plaindb_core::{
     DEFAULT_HISTORY_LIMIT, Doc, Format, Op, PushMode, PushOutcome, Store, Tx, codec_for,
 };
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 const COLLECTIONS: [(&str, Format); 3] = [
@@ -116,7 +117,15 @@ fn a_clone_of_the_remote_opens_as_the_same_store() {
     fs::create_dir_all(&remote).unwrap();
     git(&remote, &["init", "-q", "--bare", "-b", "main"]);
     let root = dir.path().join("store");
-    let original = Store::init_with_git(&root).unwrap();
+    let original = Store::init_with(
+        &root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     original.create_db("main").unwrap();
     for (collection, format) in COLLECTIONS {
         original

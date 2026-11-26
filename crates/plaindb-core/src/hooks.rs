@@ -1,6 +1,19 @@
 #[cfg(feature = "test-hooks")]
 mod enabled {
+    use std::cell::Cell;
     use std::time::Duration;
+
+    thread_local! {
+        static FULL_FLUSHES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn full_flush() {
+        FULL_FLUSHES.with(|count| count.set(count.get() + 1));
+    }
+
+    pub fn full_flush_count() -> u64 {
+        FULL_FLUSHES.with(Cell::get)
+    }
 
     const CRASH_STATUS: i32 = 86;
 
@@ -47,6 +60,8 @@ mod enabled {
 
 #[cfg(not(feature = "test-hooks"))]
 mod enabled {
+    pub(crate) fn full_flush() {}
+
     pub(crate) fn before_journal() {}
 
     pub(crate) fn after_journal() {}
@@ -58,6 +73,8 @@ mod enabled {
     pub(crate) fn after_git_commit() {}
 }
 
+#[cfg(feature = "test-hooks")]
+pub use enabled::full_flush_count;
 pub(crate) use enabled::{
-    after_files, after_git_commit, after_journal, before_git_commit, before_journal,
+    after_files, after_git_commit, after_journal, before_git_commit, before_journal, full_flush,
 };

@@ -6,6 +6,7 @@ use plaindb_core::{
     Doc, Error, ErrorCode, Format, IndexSpec, Op, Store, Tx, new_id, scan::read_generation,
     version_of,
 };
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -54,7 +55,14 @@ fn delete(coll: &str, id: &str, if_version: Option<&str>) -> Op {
 }
 
 fn store_with_users(root: &Path) -> Store {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "users", Format::Json)
@@ -514,6 +522,35 @@ fn a_repeated_transaction_id_returns_the_first_result() {
 }
 
 #[test]
+fn a_transaction_id_used_by_another_handle_is_still_recognised() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_handle = store_with_users(temp.path());
+    let second_handle = Store::open(temp.path()).unwrap();
+    let seen = new_id();
+    second_handle
+        .apply(Tx {
+            id: Some(new_id()),
+            ..Tx::new(vec![insert("users", "early", json!({}))])
+        })
+        .unwrap();
+    let first = first_handle
+        .apply(Tx {
+            id: Some(seen.clone()),
+            ..Tx::new(vec![insert("users", "ann", json!({"n": 1}))])
+        })
+        .unwrap();
+    let again = second_handle
+        .apply(Tx {
+            id: Some(seen),
+            ..Tx::new(vec![put("users", "ann", json!({"n": 2}), None)])
+        })
+        .unwrap();
+    assert_eq!(again, first);
+    let (found, _) = second_handle.get("main", "users", "ann").unwrap().unwrap();
+    assert_eq!(found["n"], json!(1));
+}
+
+#[test]
 fn a_transaction_id_must_be_a_ulid() {
     let temp = tempfile::tempdir().unwrap();
     let store = store_with_users(temp.path());
@@ -613,7 +650,14 @@ fn markdown_and_yaml_documents_round_trip_through_writes() {
 #[test]
 fn admin_writes_create_and_drop_dbs_and_collections() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::init(temp.path()).unwrap();
+    let store = Store::init_with(
+        temp.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     let error = store
         .create_collection("main", "users", Format::Json)
         .unwrap_err();
@@ -651,7 +695,14 @@ fn admin_writes_create_and_drop_dbs_and_collections() {
 #[test]
 fn admin_writes_reject_bad_names() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::init(temp.path()).unwrap();
+    let store = Store::init_with(
+        temp.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         store.create_db("Main").unwrap_err().code,
         ErrorCode::InvalidName

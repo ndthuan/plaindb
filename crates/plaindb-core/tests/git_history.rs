@@ -8,6 +8,7 @@ use std::time::Duration;
 use plaindb_core::{
     At, DEFAULT_HISTORY_LIMIT, Doc, ErrorCode, Format, Op, Store, Timestamp, Tx, version_of,
 };
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -43,7 +44,15 @@ fn put(id: &str, value: Value) -> Op {
 }
 
 fn git_store(root: &Path) -> Store {
-    let store = Store::init_with_git(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "notes", Format::Md)
@@ -257,7 +266,14 @@ fn an_ambiguous_or_wrong_commit_id_is_an_invalid_query() {
 #[test]
 fn time_travel_needs_git() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
+    let store = Store::init_with(
+        dir.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "notes", Format::Md)

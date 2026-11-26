@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::atomic::ensure_dir;
 use crate::config::DEFAULT_LOCK_TIMEOUT_MS;
+use crate::config::Durability;
 use crate::error::{Error, ErrorCode, Result};
 use crate::store::STATE_DIR;
 
@@ -29,7 +30,7 @@ fn would_block<T>(outcome: std::result::Result<T, TryLockError>) -> Result<bool>
 impl WriteLock {
     fn open(store: &Path, name: &str) -> Result<File> {
         let dir = store.join(STATE_DIR);
-        ensure_dir(&dir)?;
+        ensure_dir(&dir, Durability::Full)?;
         Ok(OpenOptions::new()
             .create(true)
             .truncate(false)

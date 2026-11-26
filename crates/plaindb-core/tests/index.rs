@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use plaindb_core::{Doc, ErrorCode, Format, IndexSpec, Op, Query, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use serde_json::{Value, json};
@@ -56,7 +57,14 @@ fn multi(field: &str) -> IndexSpec {
 }
 
 fn store_with(root: &Path, collections: &[&str]) -> Store {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     for name in collections {
         store.create_collection("main", name, Format::Json).unwrap();

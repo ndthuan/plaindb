@@ -23,11 +23,13 @@ pub mod write;
 pub use atomic::{remove_durable, write_atomic};
 pub use codec::{Codec, Doc, codec_for};
 pub use config::{
-    CollectionMeta, CommitMode, DEFAULT_LOCK_TIMEOUT_MS, Format, IndexSpec, Limits, PushMode,
-    STORE_FORMAT, StoreConfig,
+    CollectionMeta, CommitMode, DEFAULT_LOCK_TIMEOUT_MS, Durability, Format, IndexSpec, Limits,
+    PushMode, STORE_FORMAT, StoreConfig,
 };
 pub use error::{Error, ErrorCode, Result};
 pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry, PushOutcome};
+#[cfg(feature = "test-hooks")]
+pub use hooks::full_flush_count;
 pub use jiff::Timestamp;
 pub use lock::WriteLock;
 pub use names::{new_id, validate_collection_name, validate_db_name, validate_id};

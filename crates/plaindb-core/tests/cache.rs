@@ -4,6 +4,7 @@ use std::path::Path;
 use plaindb_core::cache;
 use plaindb_core::scan::full_scan;
 use plaindb_core::{Dir, Doc, Format, IndexSpec, Op, Query, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -33,7 +34,14 @@ fn indexes() -> Vec<IndexSpec> {
 }
 
 fn populate(root: &Path) {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     for (name, format) in [
         ("people", Format::Json),

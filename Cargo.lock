@@ -1758,6 +1758,7 @@ dependencies = [
  "jiff",
  "json-patch",
  "jsonschema",
+ "libc",
  "proptest",
  "rmp-serde",
  "rpds",

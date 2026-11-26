@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atomic::remove_durable;
+use crate::atomic::{flush, remove_durable};
+use crate::config::Durability;
 use crate::error::Result;
 use crate::store::STATE_DIR;
 
@@ -39,7 +40,7 @@ pub(crate) fn read(root: &Path) -> Result<Vec<PendingTx>> {
     Ok(parse(&read_text(root)?))
 }
 
-pub(crate) fn append(root: &Path, entry: &PendingTx) -> Result<()> {
+pub(crate) fn append(root: &Path, entry: &PendingTx, durability: Durability) -> Result<()> {
     let text = read_text(root)?;
     if parse(&text)
         .iter()
@@ -57,7 +58,7 @@ pub(crate) fn append(root: &Path, entry: &PendingTx) -> Result<()> {
         file.write_all(b"\n")?;
     }
     file.write_all(line.as_bytes())?;
-    file.sync_all()?;
+    flush(&file, durability)?;
     Ok(())
 }
 

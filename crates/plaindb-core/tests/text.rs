@@ -1,5 +1,6 @@
 use plaindb_core::text::tokens;
 use plaindb_core::{Doc, ErrorCode, Format, IndexSpec, Op, Query, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -19,7 +20,14 @@ fn insert(coll: &str, id: &str, value: Value) -> Op {
 }
 
 fn store_with(root: &std::path::Path, coll: &str, format: Format) -> Store {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store.create_collection("main", coll, format).unwrap();
     store

@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use plaindb_core::{
-    CollectionMeta, ErrorCode, Format, Store, new_id, validate_collection_name, validate_db_name,
-    validate_id,
+    CollectionMeta, Durability, ErrorCode, Format, Store, StoreConfig, new_id,
+    validate_collection_name, validate_db_name, validate_id,
 };
 use serde_json::{Value, json};
 
@@ -58,6 +58,7 @@ fn init_in_an_empty_directory_writes_the_layout() {
     assert_eq!(value["push"], json!("off"));
     assert_eq!(value["remote"], json!("origin"));
     assert_eq!(value["branch"], json!("main"));
+    assert_eq!(value["durability"], json!("full"));
     assert_eq!(value["limits"]["max_results"], Value::Null);
     let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
     let mut sorted = keys.clone();
@@ -103,6 +104,72 @@ fn open_reads_what_init_wrote() {
     let created = Store::init(temp.path()).unwrap();
     let opened = Store::open(temp.path()).unwrap();
     assert_eq!(created.config(), opened.config());
+}
+
+#[test]
+fn durability_round_trips_through_the_store_file() {
+    for durability in [Durability::Full, Durability::Normal, Durability::Off] {
+        let temp = tempfile::tempdir().unwrap();
+        Store::init_with(
+            temp.path(),
+            StoreConfig {
+                durability,
+                ..StoreConfig::default()
+            },
+        )
+        .unwrap();
+        let value: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("_store.json")).unwrap()).unwrap();
+        assert_eq!(value["durability"], json!(durability.as_str()));
+        let opened = Store::open(temp.path()).unwrap();
+        assert_eq!(opened.config().durability, durability);
+    }
+}
+
+#[test]
+fn a_store_file_without_durability_reads_as_full() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("_store.json"), "{\"format\": 1}\n").unwrap();
+    let opened = Store::open(temp.path()).unwrap();
+    assert_eq!(opened.config().durability, Durability::Full);
+}
+
+#[test]
+fn an_unknown_durability_fails_open() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("_store.json"),
+        "{\"format\": 1, \"durability\": \"fast\"}\n",
+    )
+    .unwrap();
+    let error = Store::open(temp.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAStore);
+    assert_eq!(error.details["reason"], json!("unreadable_store_file"));
+}
+
+#[test]
+fn set_durability_is_kept_in_the_store_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    store.set_durability(Durability::Normal).unwrap();
+    store.set_durability(Durability::Normal).unwrap();
+    let opened = Store::open(temp.path()).unwrap();
+    assert_eq!(opened.config().durability, Durability::Normal);
+}
+
+#[test]
+fn init_with_refuses_a_format_it_cannot_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = Store::init_with(
+        temp.path(),
+        StoreConfig {
+            format: 2,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnsupportedFormat);
+    assert!(!temp.path().join("_store.json").exists());
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use plaindb_core::{Doc, Format, Op, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
@@ -61,7 +62,15 @@ fn put(id: &str, value: Value) -> Op {
 }
 
 fn git_store(root: &Path) -> Store {
-    let store = Store::init_with_git(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)
@@ -273,7 +282,14 @@ fn admin_operations_commit_with_their_subjects() {
 fn enabling_git_commits_the_existing_store_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Md)
@@ -399,7 +415,14 @@ fn a_crash_after_the_commit_is_not_committed_twice() {
 fn a_store_without_git_makes_no_repository() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)

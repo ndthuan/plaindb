@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::config::{CollectionMeta, Format, IndexSpec, STORE_FORMAT, to_file_bytes};
+use crate::config::{CollectionMeta, Durability, Format, IndexSpec, STORE_FORMAT, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::git;
 use crate::index::Indexes;
 use crate::journal::{self, JournalEntry};
 use crate::names::{new_id, validate_collection_name, validate_db_name};
 use crate::scan::{self, SYSTEM_FIELDS, compile_validator};
-use crate::store::{DB_FILE, META_FILE, Store, read_config};
+use crate::store::{DB_FILE, META_FILE, STORE_FILE, Store, read_config};
 
 fn already_exists(kind: &str, name: &str) -> Error {
     Error::new(
@@ -27,7 +27,7 @@ impl Store {
         let tx_id = new_id();
         let plan = git::plan_admin(&self.root, &read_config(&self.root)?, &tx_id, subject)?;
         let journal = plan.into_journal(tx_id, generation, entries);
-        journal::commit(&self.root, &journal)?;
+        journal::commit(&self.root, &mut self.writer(), &journal)?;
         let current = self.snapshot.load_full();
         self.snapshot
             .store(Arc::new(scan::rescan(&self.root, &current)?));
@@ -170,6 +170,24 @@ impl Store {
             db,
             collection,
             &meta,
+        )
+    }
+
+    pub fn set_durability(&self, durability: Durability) -> Result<()> {
+        let _push = self.push_guard();
+        let _lock = self.begin_write()?;
+        let mut config = read_config(&self.root)?;
+        if config.durability == durability {
+            return Ok(());
+        }
+        config.durability = durability;
+        self.commit_admin(
+            &format!("meta store: set durability {}", durability.as_str()),
+            vec![JournalEntry::write(
+                STORE_FILE.to_owned(),
+                &to_file_bytes(&config),
+                None,
+            )],
         )
     }
 }

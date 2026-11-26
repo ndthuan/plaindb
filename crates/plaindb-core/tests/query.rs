@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use plaindb_core::{Dir, Doc, ErrorCode, Format, Op, Query, Store, Tx};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 fn doc(value: Value) -> Doc {
@@ -20,7 +21,14 @@ fn insert(id: &str, value: Value) -> Op {
 }
 
 fn fixture(root: &std::path::Path) -> Store {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)
@@ -147,7 +155,14 @@ fn missing_fields_match_only_exists_false_and_ne() {
 #[test]
 fn sort_orders_mixed_types() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
+    let store = Store::init_with(
+        dir.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)

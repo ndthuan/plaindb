@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use plaindb_core::{CollectionMeta, ErrorCode, Format, Store};
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::json;
 
 fn make_collection(root: &Path, db: &str, collection: &str, meta: &CollectionMeta) {
@@ -13,7 +14,14 @@ fn make_collection(root: &Path, db: &str, collection: &str, meta: &CollectionMet
 }
 
 fn json_store(root: &Path) -> Store {
-    let store = Store::init(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     make_collection(root, "main", "users", &CollectionMeta::new(Format::Json));
     store.rescan().unwrap();
     store
@@ -191,7 +199,14 @@ fn missing_timestamps_stay_absent() {
 #[test]
 fn a_document_failing_the_schema_is_invalid() {
     let temp = tempfile::tempdir().unwrap();
-    Store::init(temp.path()).unwrap();
+    Store::init_with(
+        temp.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     let mut meta = CollectionMeta::new(Format::Json);
     meta.schema = Some(json!({
         "type": "object",

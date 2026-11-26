@@ -16,7 +16,6 @@ use crate::names::{new_id, validate_collection_name, validate_db_name, validate_
 use crate::scan::{self, FileRef, SYSTEM_FIELDS, compile_validator, find_case_duplicates};
 use crate::snapshot::{CollectionSnapshot, DocEntry, FileEntry, Outcome, Snapshot};
 use crate::store::{Store, read_config};
-use crate::txlog;
 use crate::version::version_of;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -554,7 +553,11 @@ fn read_version(path: &std::path::Path) -> Result<Option<String>> {
 impl Store {
     pub(crate) fn begin_write(&self) -> Result<WriteLock> {
         let lock = WriteLock::acquire(&self.root, self.lock_timeout())?;
-        journal::recover(&self.root)?;
+        let durability = read_config(&self.root)?.durability;
+        let mut writer = self.writer();
+        writer.durability = durability;
+        journal::recover(&self.root, &mut writer)?;
+        drop(writer);
         let foreign = git::prepare_write(&self.root)?;
         let current = self.snapshot.load_full();
         if foreign || scan::read_generation(&self.root)? != current.generation {
@@ -581,7 +584,7 @@ impl Store {
             None => new_id(),
         };
         let _lock = self.begin_write()?;
-        if supplied && let Some(found) = txlog::find(&self.root, &tx_id)? {
+        if supplied && let Some(found) = self.writer().tx_log.find(&self.root, &tx_id)? {
             return Ok(found);
         }
         let snapshot = self.snapshot.load_full();
@@ -639,7 +642,7 @@ impl Store {
         )?;
         let mut journal = plan.into_journal(result.tx_id.clone(), generation, entries);
         journal.result = Some(result.clone());
-        journal::commit(&self.root, &journal)?;
+        journal::commit(&self.root, &mut self.writer(), &journal)?;
         self.publish(&snapshot, generation, &targets)?;
         Ok(result)
     }

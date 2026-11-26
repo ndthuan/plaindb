@@ -1,17 +1,17 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use serde_json::Value;
 
-use crate::atomic::{ensure_dir, write_atomic};
+use crate::atomic::{ensure_dir, write_atomic_at};
 use crate::cache;
 use crate::codec::Doc;
 use crate::config::{
-    CollectionMeta, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
+    CollectionMeta, Durability, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::git;
@@ -20,17 +20,34 @@ use crate::lock::WriteLock;
 use crate::names::{validate_collection_name, validate_db_name, validate_id};
 use crate::scan;
 use crate::snapshot::{CollectionSnapshot, InvalidFile, Outcome, Snapshot, Status, Warning};
+use crate::txlog::TxLog;
 
 pub const STORE_FILE: &str = "_store.json";
 pub const DB_FILE: &str = "_db.json";
 pub const META_FILE: &str = "_meta.json";
 pub const STATE_DIR: &str = ".plaindb";
 
+#[derive(Debug, Default)]
+pub(crate) struct WriterState {
+    pub durability: Durability,
+    pub tx_log: TxLog,
+}
+
+impl WriterState {
+    fn new(durability: Durability) -> Self {
+        Self {
+            durability,
+            tx_log: TxLog::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub(crate) root: PathBuf,
     pub(crate) config: StoreConfig,
     pub(crate) snapshot: ArcSwap<Snapshot>,
+    pub(crate) writer: Mutex<WriterState>,
 }
 
 pub type Version = String;
@@ -114,6 +131,10 @@ impl Drop for Store {
 
 impl Store {
     pub fn init(dir: impl AsRef<Path>) -> Result<Self> {
+        Self::init_with(dir, StoreConfig::default())
+    }
+
+    pub fn init_with(dir: impl AsRef<Path>, config: StoreConfig) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
         match fs::metadata(&root) {
             Ok(meta) if meta.is_dir() => {
@@ -140,22 +161,44 @@ impl Store {
             Err(source) if source.kind() == ErrorKind::NotFound => fs::create_dir_all(&root)?,
             Err(source) => return Err(source.into()),
         }
-        let config = StoreConfig::default();
-        ensure_dir(&root.join(STATE_DIR))?;
-        write_atomic(&root.join(STORE_FILE), &to_file_bytes(&config))?;
+        if config.format != STORE_FORMAT {
+            return Err(Error::new(
+                ErrorCode::UnsupportedFormat,
+                "a new store must use the current format",
+            )
+            .with_detail("found", config.format)
+            .with_detail("supported", STORE_FORMAT));
+        }
+        ensure_dir(&root.join(STATE_DIR), config.durability)?;
+        let initial = StoreConfig {
+            git: false,
+            ..config.clone()
+        };
+        write_atomic_at(
+            &root.join(STORE_FILE),
+            &to_file_bytes(&initial),
+            config.durability,
+        )?;
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
-        Ok(Self {
+        let writer = Mutex::new(WriterState::new(config.durability));
+        let store = Self {
             root,
             config,
             snapshot,
-        })
+            writer,
+        };
+        if store.config.git {
+            store.turn_git_on(git::INIT_STORE_SUBJECT)?;
+        }
+        Ok(store)
     }
 
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
         let config = read_config(&root)?;
+        let mut writer = WriterState::new(config.durability);
         if let Some(_lock) = WriteLock::try_acquire(&root)? {
-            journal::recover(&root)?;
+            journal::recover(&root, &mut writer)?;
             git::prepare_write(&root)?;
         }
         let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
@@ -163,7 +206,12 @@ impl Store {
             root,
             config,
             snapshot,
+            writer: Mutex::new(writer),
         })
+    }
+
+    pub(crate) fn writer(&self) -> MutexGuard<'_, WriterState> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn lock_timeout(&self) -> Duration {

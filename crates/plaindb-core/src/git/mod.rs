@@ -39,7 +39,7 @@ pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
 const GIT_DIR: &str = ".git";
 const FALLBACK_NAME: &str = "plaindb";
 const FALLBACK_EMAIL: &str = "plaindb@localhost";
-const INIT_STORE_SUBJECT: &str = "init store";
+pub(crate) const INIT_STORE_SUBJECT: &str = "init store";
 const ENABLE_SUBJECT: &str = "git: enable";
 
 pub type CommitId = String;
@@ -220,7 +220,7 @@ fn ensure_gitignore(root: &Path) -> Result<()> {
         Some(text) => format!("{text}\n{GITIGNORE_LINE}\n"),
         None => format!("{GITIGNORE_LINE}\n"),
     };
-    crate::atomic::write_atomic(&path, text.as_bytes())
+    crate::atomic::write_atomic_at(&path, text.as_bytes(), read_config(root)?.durability)
 }
 
 fn init_repo(root: &Path, branch: &str) -> Result<()> {
@@ -372,16 +372,20 @@ fn commit_worktree(root: &Path, subject: &str) -> Result<Option<ObjectId>> {
 
 impl Store {
     pub fn init_with_git(dir: impl AsRef<Path>) -> Result<Self> {
-        let store = Self::init(dir)?;
-        store.turn_git_on(INIT_STORE_SUBJECT)?;
-        Ok(store)
+        Self::init_with(
+            dir,
+            StoreConfig {
+                git: true,
+                ..StoreConfig::default()
+            },
+        )
     }
 
     pub fn enable_git(&self) -> Result<()> {
         self.turn_git_on(ENABLE_SUBJECT)
     }
 
-    fn turn_git_on(&self, subject: &str) -> Result<()> {
+    pub(crate) fn turn_git_on(&self, subject: &str) -> Result<()> {
         let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let mut config = read_config(&self.root)?;
@@ -393,7 +397,11 @@ impl Store {
         }
         ensure_gitignore(&self.root)?;
         config.git = true;
-        crate::atomic::write_atomic(&self.root.join(STORE_FILE), &to_file_bytes(&config))?;
+        crate::atomic::write_atomic_at(
+            &self.root.join(STORE_FILE),
+            &to_file_bytes(&config),
+            config.durability,
+        )?;
         commit_worktree(&self.root, subject)?;
         Ok(())
     }

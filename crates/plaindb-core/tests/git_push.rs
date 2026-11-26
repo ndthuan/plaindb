@@ -7,6 +7,7 @@ use std::process::Command;
 use plaindb_core::{
     CommitMode, Doc, ErrorCode, Format, Op, PushMode, PushOutcome, Store, Tx, TxResult,
 };
+use plaindb_core::{Durability, StoreConfig};
 use serde_json::{Value, json};
 
 const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
@@ -57,7 +58,15 @@ fn put(id: &str, n: u64) -> Tx {
 }
 
 fn pushing_store(root: &Path, remote: &Path) -> Store {
-    let store = Store::init_with_git(root).unwrap();
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)

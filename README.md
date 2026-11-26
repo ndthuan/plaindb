@@ -21,6 +21,14 @@ To restore, run `git clone <remote> <directory>` and open that directory as a st
 
 Nothing is pulled or merged automatically.
 
+## Durability
+
+`"durability"` in `_store.json` sets how far a write is flushed before it returns:
+
+- `full`, the default: flushed to stable storage, with a full drive cache flush on macOS. A committed write survives a power loss.
+- `normal`: a plain `fsync`. A committed write survives a crash of the process or the operating system. On macOS a power loss may lose the last writes, but never leaves the store half written.
+- `off`: no flush. A committed write survives a crash of the process only.
+
 ## Performance
 
 Git history size after 10,000 single-document transactions: each transaction rewrites one of 1,000 documents of about 270 bytes in a JSON collection. Measured with `make bench` on an Apple M2 Pro.
