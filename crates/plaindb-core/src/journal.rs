@@ -118,7 +118,8 @@ impl JournalEntry {
         if replay != Replay::Always {
             let current = read_version(&target)?;
             let wanted = bytes.as_deref().map(version_of);
-            if current == wanted || current != self.old_version {
+            let created_then_removed = current.is_none() && self.old_version.is_none();
+            if current == wanted || current != self.old_version || created_then_removed {
                 return Ok(());
             }
         }
@@ -258,12 +259,17 @@ fn finish(root: &Path, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
-fn roll_forward(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
+fn roll_forward(
+    root: &Path,
+    journal: &Journal,
+    unfinished: usize,
+    durability: Durability,
+) -> Result<()> {
     for entry in &journal.entries {
         entry.apply(root, durability, Replay::Always)?;
     }
     if journal.commit_pending {
-        commit_journal(root, journal)?;
+        commit_journal(root, journal, unfinished)?;
     }
     finish(root, journal)
 }
@@ -328,7 +334,7 @@ pub(crate) fn commit(root: &Path, state: &mut WriterState, journal: &Journal) ->
     }
     if journal.commit_pending {
         hooks::before_git_commit();
-        commit_journal(root, journal)?;
+        commit_journal(root, journal, 1)?;
     }
     finish(root, journal)?;
     if in_step {
@@ -366,7 +372,7 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
         remove_stray_temp_files(root, &journals)?;
     }
     for journal in &unfinished {
-        roll_forward(root, journal, state.durability)?;
+        roll_forward(root, journal, unfinished.len(), state.durability)?;
     }
     remember(root, state, &journals)?;
     Ok(!unfinished.is_empty())
@@ -381,10 +387,14 @@ pub(crate) fn recover(root: &Path, state: &mut WriterState) -> Result<bool> {
         return Ok(false);
     }
     let generation = read_generation(root)?;
+    let unfinished = journals
+        .iter()
+        .filter(|journal| journal.generation > generation)
+        .count();
     let boot = boot_id();
     for (index, journal) in journals.iter().enumerate() {
         if journal.generation > generation {
-            roll_forward(root, journal, state.durability)?;
+            roll_forward(root, journal, unfinished, state.durability)?;
         } else if boot.is_none() || journal.boot != boot {
             replay_settled(root, journal, &journals[index + 1..], state.durability)?;
         }

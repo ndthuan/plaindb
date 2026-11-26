@@ -18,6 +18,8 @@ const KILLS: usize = 50;
 const CHECKPOINT_INTERVAL: u64 = 4;
 const CHECKPOINT_CRASH_EVERY: usize = 5;
 const CRASH_STATUS: i32 = 86;
+const REBOOT_ROUNDS: u64 = 40;
+const REBOOT_ROUND_TRANSACTIONS: u64 = 8;
 const COLLECTIONS: [(&str, Format); 3] = [
     ("docs", Format::Json),
     ("cards", Format::Yaml),
@@ -30,7 +32,7 @@ enum Event {
         previous: Option<String>,
         version: Option<String>,
     },
-    Edited(String),
+    Edited(Option<String>),
 }
 
 struct Slot {
@@ -125,7 +127,7 @@ fn hand_edit(
     root: &Path,
     random: &mut Random,
     marker: u64,
-) -> Option<(u64, String, String, String)> {
+) -> Option<(u64, String, String, Option<String>)> {
     let _lock = WriteLock::acquire(root, Duration::from_secs(30)).unwrap();
     if has_unfinished_record(root) {
         return None;
@@ -153,8 +155,49 @@ fn hand_edit(
         read_generation(root).unwrap(),
         collection.to_owned(),
         id,
-        version_of(&bytes),
+        Some(version_of(&bytes)),
     ))
+}
+
+fn delete_created(root: &Path, random: &mut Random) -> Option<(u64, String, String)> {
+    let mut created: Vec<String> = journal_records(root)
+        .iter()
+        .flat_map(|journal| journal["entries"].as_array().cloned().unwrap_or_default())
+        .filter(|entry| entry.get("bytes_b64").is_some_and(Value::is_string))
+        .filter(|entry| entry.get("old_version").is_none_or(Value::is_null))
+        .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+        .filter(|path| {
+            path.rsplit('/')
+                .next()
+                .is_some_and(|name| !name.starts_with('_'))
+        })
+        .filter(|path| root.join(path).is_file())
+        .collect();
+    if created.is_empty() {
+        return None;
+    }
+    created.sort();
+    created.dedup();
+    let path = created[usize::try_from(random.below(created.len() as u64)).unwrap()].clone();
+    fs::remove_file(root.join(&path)).unwrap();
+    let mut parts = path.split('/').skip(1);
+    let collection = parts.next()?.to_owned();
+    let id = parts.next()?.rsplit_once('.')?.0.to_owned();
+    Some((read_generation(root).unwrap(), collection, id))
+}
+
+fn open_after_a_reboot(root: &Path, boot: u64) {
+    let output = Command::new(WRITER)
+        .arg(root)
+        .arg("open")
+        .env("PLAINDB_TEST_BOOT_ID", format!("reboot-{boot}"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn record_commit(
@@ -208,13 +251,14 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
         .collect();
     let mut settled: Vec<(Vec<String>, TxResult)> = Vec::new();
     let mut settled_ids: HashSet<String> = HashSet::new();
-    let mut edits: Vec<(u64, String, String, String)> = Vec::new();
+    let mut edits: Vec<(u64, String, String, Option<String>)> = Vec::new();
+    let mut deletes = 0;
     let mut kills = 0;
     let mut checkpoint_crashes = 0;
     let started = Instant::now();
     let total = TRANSACTIONS * CHILDREN as u64;
     let kill_spacing = total * 9 / 10 / KILLS as u64;
-    let mut marker = 0;
+    let mut marker: u64 = 0;
     let mut last_edit = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(5));
@@ -294,6 +338,31 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     );
     assert!(edits.len() > 100, "only {} hand edits", edits.len());
 
+    let reboot_log = logs.join("reboot.jsonl");
+    for round in 0..REBOOT_ROUNDS {
+        let output = spawn_crashing(&root, &reboot_log, REBOOT_ROUND_TRANSACTIONS, Some(0))
+            .wait_with_output()
+            .unwrap();
+        assert!(
+            output.status.success() || output.status.code() == Some(CRASH_STATUS),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if let Some((tx_id, collections)) = unfinished(&reboot_log)
+            && !settled_ids.contains(&tx_id)
+            && let Some(result) = settle(&root, &tx_id)
+        {
+            settled_ids.insert(tx_id);
+            settled.push((collections, result));
+        }
+        if let Some((generation, collection, id)) = delete_created(&root, &mut random) {
+            edits.push((generation, collection, id, None));
+            deletes += 1;
+        }
+        open_after_a_reboot(&root, round);
+    }
+    assert!(deletes > 10, "only {deletes} hand deletes");
+
     let mut events: Vec<(u64, u64, String, String, Event)> = Vec::new();
     let mut begins: HashMap<String, Vec<String>> = HashMap::new();
     for entry in fs::read_dir(&logs).unwrap() {
@@ -341,7 +410,7 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
                 );
                 *known = (version, false);
             }
-            Event::Edited(version) => *known = (Some(version), true),
+            Event::Edited(version) => *known = (version, true),
         }
     }
 

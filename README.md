@@ -94,7 +94,7 @@ A transaction is committed when its record, which holds the new bytes of every f
 
 Records stay in the journal until a checkpoint: every 64 transactions (`"checkpoint_interval"` in `_store.json`), when a store is closed, or when asked for. A checkpoint flushes the directories the records touched, moves the records into the transaction log and empties the journal.
 
-Opening a store finishes any transaction whose files were not all written. After the machine restarts, it also writes again the files of every transaction not yet checkpointed, except files that were edited by hand since that transaction.
+Opening a store finishes any transaction whose files were not all written. After the machine restarts, it also writes again the files of every transaction not yet checkpointed, except files that were edited or removed by hand since that transaction. With git on, a transaction that already has its commit is never committed again.
 
 ## Performance
 

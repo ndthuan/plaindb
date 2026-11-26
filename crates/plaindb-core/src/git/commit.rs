@@ -140,19 +140,40 @@ fn record_commit(root: &Path, repo: &gix::Repository, id: ObjectId) -> Result<()
     Ok(())
 }
 
+fn find_committed(
+    repo: &gix::Repository,
+    head: Option<ObjectId>,
+    tx_id: &str,
+    look_back: usize,
+) -> Result<Option<ObjectId>> {
+    let mut current = head;
+    for _ in 0..look_back.max(1) {
+        let Some(id) = current else {
+            break;
+        };
+        if tx_ids_of(repo, id)?.iter().any(|known| known == tx_id) {
+            return Ok(Some(id));
+        }
+        current = repo
+            .find_commit(id)
+            .map_err(git_error)?
+            .parent_ids()
+            .next()
+            .map(gix::Id::detach);
+    }
+    Ok(None)
+}
+
 pub(crate) fn commit_changes(
     root: &Path,
     changes: &[Change],
     message: &str,
     tx_id: &str,
+    look_back: usize,
 ) -> Result<ObjectId> {
     let repo = open(root)?;
     let head = head_id(&repo)?;
-    let already = match head {
-        Some(id) if tx_ids_of(&repo, id)?.iter().any(|known| known == tx_id) => Some(id),
-        _ => None,
-    };
-    let id = match already {
+    let id = match find_committed(&repo, head, tx_id, look_back)? {
         Some(id) => id,
         None => {
             let id = write_commit(&repo, head, changes, message)?;
@@ -166,7 +187,7 @@ pub(crate) fn commit_changes(
     Ok(id)
 }
 
-pub(crate) fn commit_journal(root: &Path, journal: &Journal) -> Result<()> {
+pub(crate) fn commit_journal(root: &Path, journal: &Journal, look_back: usize) -> Result<()> {
     let Some(message) = &journal.commit_message else {
         return Ok(());
     };
@@ -189,7 +210,7 @@ pub(crate) fn commit_journal(root: &Path, journal: &Journal) -> Result<()> {
         };
         changes.push(change);
     }
-    commit_changes(root, &changes, message, &journal.tx_id)?;
+    commit_changes(root, &changes, message, &journal.tx_id, look_back)?;
     Ok(())
 }
 

@@ -379,7 +379,7 @@ fn commit_worktree(root: &Path, subject: &str) -> Result<Option<ObjectId>> {
     let tx_id = new_id();
     let actor = resolve_actor(&repo, None);
     let text = message::admin_message(subject, &tx_id, &actor);
-    commit::commit_changes(root, &changes, &text, &tx_id).map(Some)
+    commit::commit_changes(root, &changes, &text, &tx_id, 1).map(Some)
 }
 
 impl Store {
@@ -483,7 +483,7 @@ impl Store {
         let tx_id = lines
             .first()
             .map_or(fallback_tx_id.as_str(), |line| line.tx_id);
-        let id = commit::commit_changes(&self.root, &changes, &text, tx_id)?;
+        let id = commit::commit_changes(&self.root, &changes, &text, tx_id, 1)?;
         pending::clear(&self.root)?;
         Ok(Some(id.to_string()))
     }

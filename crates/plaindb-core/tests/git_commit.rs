@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use plaindb_core::{Doc, Format, Op, Store, Tx};
-use plaindb_core::{Durability, StoreConfig};
+use plaindb_core::{Durability, StoreConfig, scan::read_generation};
 use serde_json::{Value, json};
 
 const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
@@ -456,4 +456,41 @@ fn a_store_copied_without_its_repository_starts_a_new_one() {
         .unwrap();
     assert_eq!(subjects(root)[0], "insert main/items/a");
     assert_clean(root);
+}
+
+fn tx_id_trailers(root: &Path) -> Vec<String> {
+    git(
+        root,
+        &["log", "--format=%(trailers:key=Plaindb-Tx-Id,valueonly)"],
+    )
+    .lines()
+    .filter(|line| !line.is_empty())
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn transactions_rolled_forward_after_a_lost_generation_are_not_committed_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    drop(git_store(root));
+    let generation = read_generation(root).unwrap();
+    let status = Command::new(WRITER)
+        .arg(root)
+        .arg("insert")
+        .arg("3")
+        .env("PLAINDB_TEST_CRASH_IN_CHECKPOINT", "0")
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(86));
+    let before = subjects(root).len();
+    let committed = tx_id_trailers(root);
+    fs::write(root.join(".plaindb/generation"), format!("{generation}\n")).unwrap();
+    let store = Store::open(root).unwrap();
+    assert_eq!(subjects(root).len(), before);
+    assert_eq!(tx_id_trailers(root), committed);
+    assert_eq!(read_generation(root).unwrap(), generation + 3);
+    assert_clean(root);
+    assert!(store.status().unwrap().warnings.is_empty());
 }

@@ -273,11 +273,34 @@ fn files_lost_after_the_commit_are_written_again_on_open() {
     written_but_not_checkpointed(temp.path(), 0);
     fs::write(items.join("a.json"), &old_a).unwrap();
     fs::write(items.join("b.json"), &old_b).unwrap();
-    fs::remove_file(items.join("c1.json")).unwrap();
     open_after_a_reboot(temp.path());
     let store = Store::open(temp.path()).unwrap();
     assert!(journal_is_empty(temp.path()));
     assert_committed(&store);
+}
+
+#[test]
+fn files_lost_with_the_generation_are_written_again_on_open() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let generation = read_generation(temp.path()).unwrap();
+    let items = temp.path().join("main").join("items");
+    let old_a = fs::read(items.join("a.json")).unwrap();
+    let old_b = fs::read(items.join("b.json")).unwrap();
+    written_but_not_checkpointed(temp.path(), 0);
+    fs::write(items.join("a.json"), &old_a).unwrap();
+    fs::write(items.join("b.json"), &old_b).unwrap();
+    fs::remove_file(items.join("c1.json")).unwrap();
+    fs::write(
+        temp.path().join(".plaindb").join("generation"),
+        format!("{generation}\n"),
+    )
+    .unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_committed(&store);
+    assert_eq!(read_generation(temp.path()).unwrap(), generation + 1);
 }
 
 fn open_after_a_reboot(root: &Path) {
@@ -321,4 +344,19 @@ fn a_hand_edit_after_the_commit_survives_the_replay() {
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
     let (found, _) = store.get("main", "items", "c1").unwrap().unwrap();
     assert_eq!(found["v"], json!(9));
+}
+
+#[test]
+fn a_created_file_removed_by_hand_stays_removed_after_a_reboot() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    written_but_not_checkpointed(temp.path(), 0);
+    let path = temp.path().join("main").join("items").join("c1.json");
+    fs::remove_file(&path).unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert!(!path.exists());
+    assert!(store.get("main", "items", "c1").unwrap().is_none());
+    assert!(store.get("main", "items", "c2").unwrap().is_some());
 }
