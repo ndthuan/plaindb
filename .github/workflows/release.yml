@@ -1,0 +1,137 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Which check to run without publishing
+        type: choice
+        options:
+          - install-check
+          - build-check
+        default: build-check
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require the tag to be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Extract the notes of this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          fi
+
+  build:
+    needs: verify
+    if: ${{ !cancelled() && (needs.verify.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.job == 'build-check')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.100"
+          targets: ${{ matrix.target }}
+      - name: Install the musl compiler
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p plaindb
+      - name: Sign the binary
+        if: runner.os == 'macOS'
+        run: codesign -s - target/${{ matrix.target }}/release/plaindb
+      - run: scripts/smoke.sh target/${{ matrix.target }}/release/plaindb
+      - name: Package the binary
+        if: github.event_name == 'push'
+        run: |
+          name="plaindb-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/plaindb LICENSE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+      - name: Upload the archive
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "plaindb-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz" --clobber
+
+  sums:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Write SHA256SUMS over the archives
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir assets
+          cd assets
+          archives=(./*.tar.gz)
+          test "${#archives[@]}" -eq 3
+          sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+
+  install-check:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'install-check'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern SHA256SUMS --dir assets
+      - name: Verify the checksums
+        run: cd assets && shasum -a 256 -c SHA256SUMS --ignore-missing
+      - name: Unpack the archive of this platform
+        run: |
+          mkdir unpacked
+          tar xzf assets/plaindb-*-${{ matrix.target }}.tar.gz -C unpacked
+      - run: scripts/smoke.sh unpacked/plaindb-*-${{ matrix.target }}/plaindb
