@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::error::{Error, ErrorCode, Result};
 
 pub const STORE_FORMAT: u32 = 1;
+pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,6 +37,7 @@ pub struct StoreConfig {
     pub push: PushMode,
     pub remote: String,
     pub branch: String,
+    pub lock_timeout_ms: u64,
     pub limits: Limits,
 }
 
@@ -48,6 +50,7 @@ impl Default for StoreConfig {
             push: PushMode::Off,
             remote: "origin".to_owned(),
             branch: "main".to_owned(),
+            lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             limits: Limits::default(),
         }
     }

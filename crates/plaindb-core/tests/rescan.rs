@@ -123,7 +123,7 @@ fn a_broken_file_is_invalid_and_refuses_reads() {
     fs::write(dir.join("ok.json"), "{\"n\": 1}").unwrap();
     fs::write(dir.join("broken.json"), "{\"n\": ").unwrap();
     store.rescan().unwrap();
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.documents, 1);
     assert_eq!(status.invalid.len(), 1);
     assert_eq!(status.invalid[0].id, "broken");
@@ -143,7 +143,7 @@ fn ids_equal_ignoring_case_are_both_invalid() {
     fs::write(dir.join("bob.json"), "{\"n\": 1}").unwrap();
     fs::write(dir.join("Bob.json"), "{\"n\": 2}").unwrap();
     store.rescan().unwrap();
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.invalid.len(), 2);
     assert!(
         status
@@ -171,7 +171,7 @@ fn the_file_name_wins_over_a_different_id_and_is_reported() {
     let (doc, _) = store.get("main", "users", "y").unwrap().unwrap();
     assert_eq!(doc["_id"], json!("y"));
     assert!(store.get("main", "users", "x").unwrap().is_none());
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.warnings.len(), 1);
     assert_eq!(status.warnings[0].code, "id_mismatch");
     assert_eq!(status.documents, 1);
@@ -209,7 +209,7 @@ fn a_document_failing_the_schema_is_invalid() {
     fs::write(dir.join("bad.json"), "{\"name\": 3}").unwrap();
     let store = Store::open(temp.path()).unwrap();
     assert!(store.get("main", "users", "good").unwrap().is_some());
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.invalid.len(), 1);
     assert_eq!(status.invalid[0].reason, "schema");
     assert_eq!(
@@ -229,7 +229,7 @@ fn other_files_and_bad_names_are_not_documents() {
     fs::write(dir.join("fine.json"), "{}").unwrap();
     store.rescan().unwrap();
     assert_eq!(store.list_ids("main", "users").unwrap(), vec!["fine"]);
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.warnings.len(), 1);
     assert_eq!(status.warnings[0].code, "invalid_name");
     assert_eq!(

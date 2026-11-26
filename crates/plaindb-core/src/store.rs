@@ -2,14 +2,18 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
+use crate::atomic::{ensure_dir, write_atomic};
 use crate::codec::Doc;
 use crate::config::{
     CollectionMeta, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
 };
 use crate::error::{Error, ErrorCode, Result};
+use crate::journal;
+use crate::lock::WriteLock;
 use crate::names::{validate_collection_name, validate_db_name, validate_id};
 use crate::scan;
 use crate::snapshot::{CollectionSnapshot, InvalidFile, Outcome, Snapshot, Status, Warning};
@@ -21,9 +25,9 @@ pub const STATE_DIR: &str = ".plaindb";
 
 #[derive(Debug)]
 pub struct Store {
-    root: PathBuf,
-    config: StoreConfig,
-    snapshot: ArcSwap<Snapshot>,
+    pub(crate) root: PathBuf,
+    pub(crate) config: StoreConfig,
+    pub(crate) snapshot: ArcSwap<Snapshot>,
 }
 
 pub type Version = String;
@@ -84,8 +88,8 @@ impl Store {
             Err(source) => return Err(source.into()),
         }
         let config = StoreConfig::default();
-        fs::write(root.join(STORE_FILE), to_file_bytes(&config))?;
-        fs::create_dir_all(root.join(STATE_DIR))?;
+        ensure_dir(&root.join(STATE_DIR))?;
+        write_atomic(&root.join(STORE_FILE), &to_file_bytes(&config))?;
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
         Ok(Self {
             root,
@@ -118,12 +122,19 @@ impl Store {
             .with_detail("found", config.format)
             .with_detail("supported", STORE_FORMAT));
         }
+        if let Some(_lock) = WriteLock::try_acquire(&root)? {
+            journal::recover(&root)?;
+        }
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
         Ok(Self {
             root,
             config,
             snapshot,
         })
+    }
+
+    pub(crate) fn lock_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.lock_timeout_ms)
     }
 
     pub fn root(&self) -> &Path {
@@ -190,8 +201,19 @@ impl Store {
     }
 
     pub fn rescan(&self) -> Result<()> {
-        let next = scan::rescan(&self.root, &self.snapshot.load())?;
-        self.snapshot.store(Arc::new(next));
+        let current = self.snapshot.load_full();
+        let next = Arc::new(scan::rescan(&self.root, &current)?);
+        self.snapshot.compare_and_swap(&current, next);
+        Ok(())
+    }
+
+    pub fn refresh_if_moved(&self) -> Result<()> {
+        let current = self.snapshot.load_full();
+        if scan::read_generation(&self.root)? == current.generation {
+            return Ok(());
+        }
+        let next = Arc::new(scan::rescan(&self.root, &current)?);
+        self.snapshot.compare_and_swap(&current, next);
         Ok(())
     }
 
@@ -203,6 +225,7 @@ impl Store {
     ) -> Result<T> {
         validate_db_name(db)?;
         validate_collection_name(collection)?;
+        self.refresh_if_moved()?;
         let snapshot = self.snapshot.load();
         let db_snapshot = snapshot
             .dbs
@@ -246,7 +269,8 @@ impl Store {
         })
     }
 
-    pub fn status(&self) -> Status {
+    pub fn status(&self) -> Result<Status> {
+        self.refresh_if_moved()?;
         let snapshot = self.snapshot.load();
         let mut status = Status {
             invalid: Vec::new(),
@@ -303,6 +327,6 @@ impl Store {
                 }
             }
         }
-        status
+        Ok(status)
     }
 }

@@ -12,15 +12,23 @@ testgen = []
 
 [dependencies]
 arc-swap = "1.9.5"
+base64 = "0.23.1"
+jiff = { version = "1.0.3", default-features = false, features = ["std"] }
+json-patch = { version = "5.0.0", default-features = false }
 jsonschema = { version = "0.63.1", default-features = false }
 rpds = "1.2.1"
-serde-saphyr = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde-saphyr = "2.2.0"
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sha1 = "0.11.0"
 thiserror = "2.0.21"
 ulid = "3.0.0"
 
 [dev-dependencies]
+fastrand = "2.5.0"
 proptest = "1.12.0"
 tempfile = "3.27.0"
+
+[[bin]]
+name = "plaindb-test-writer"
+required-features = ["test-hooks"]

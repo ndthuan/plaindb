@@ -1,0 +1,198 @@
+#![cfg(feature = "test-hooks")]
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use plaindb_core::{Doc, Format, Op, Store, Tx, TxResult, scan::read_generation};
+use serde_json::{Value, json};
+
+const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
+
+fn doc(value: Value) -> Doc {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("not an object: {other}"),
+    }
+}
+
+fn insert(id: &str, value: Value) -> Op {
+    Op::Insert {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: Some(id.to_owned()),
+        doc: doc(value),
+    }
+}
+
+fn seeded_store(root: &Path) -> Store {
+    let store = Store::init(root).unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "items", Format::Json)
+        .unwrap();
+    store
+        .apply(Tx::new(vec![
+            insert("a", json!({"v": 1})),
+            insert("b", json!({"v": 1})),
+        ]))
+        .unwrap();
+    store
+}
+
+fn documents(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                if entry.file_name() != ".plaindb" {
+                    pending.push(path);
+                }
+            } else {
+                files.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+fn journal_path(root: &Path) -> PathBuf {
+    root.join(".plaindb").join("journal.json")
+}
+
+fn crash_writer(root: &Path, env: &[(&str, String)]) -> Command {
+    let mut command = Command::new(WRITER);
+    command
+        .arg(root)
+        .arg("crash")
+        .arg("1")
+        .stdout(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
+}
+
+fn run(mut command: Command) -> Output {
+    command.output().unwrap()
+}
+
+fn wait_for(path: &Path, child: &mut Child) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the writer exited before the journal appeared"
+        );
+        assert!(started.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_committed(store: &Store) {
+    for id in ["c1", "c2", "c3"] {
+        let (found, _) = store.get("main", "items", id).unwrap().unwrap();
+        assert_eq!(found["v"], json!(1));
+    }
+    let (a, _) = store.get("main", "items", "a").unwrap().unwrap();
+    assert_eq!(a["v"], json!(2));
+    assert!(store.get("main", "items", "b").unwrap().is_none());
+}
+
+#[test]
+fn a_crash_before_the_journal_leaves_the_store_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let before = documents(temp.path());
+    let generation = read_generation(temp.path()).unwrap();
+    let output = run(crash_writer(
+        temp.path(),
+        &[("PLAINDB_TEST_CRASH_BEFORE_JOURNAL", "1".to_owned())],
+    ));
+    assert!(!output.status.success());
+    assert!(!journal_path(temp.path()).exists());
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(documents(temp.path()), before);
+    assert_eq!(read_generation(temp.path()).unwrap(), generation);
+    assert!(store.get("main", "items", "c1").unwrap().is_none());
+    assert!(store.get("main", "items", "b").unwrap().is_some());
+}
+
+#[test]
+fn a_crash_after_any_number_of_files_rolls_forward_on_open() {
+    for applied in 0..=5 {
+        let temp = tempfile::tempdir().unwrap();
+        seeded_store(temp.path());
+        let generation = read_generation(temp.path()).unwrap();
+        let output = run(crash_writer(
+            temp.path(),
+            &[("PLAINDB_TEST_CRASH_AFTER", applied.to_string())],
+        ));
+        assert!(!output.status.success(), "after {applied}");
+        let journal: Value =
+            serde_json::from_slice(&fs::read(journal_path(temp.path())).unwrap()).unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        assert!(!journal_path(temp.path()).exists(), "after {applied}");
+        assert_committed(&store);
+        assert_eq!(read_generation(temp.path()).unwrap(), generation + 1);
+        let state = fs::read_dir(temp.path().join(".plaindb"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.contains(".tmp-"))
+            .count();
+        assert_eq!(state, 0);
+        let recorded: TxResult = serde_json::from_value(journal["result"].clone()).unwrap();
+        let replayed = store
+            .apply(Tx {
+                id: Some(recorded.tx_id.clone()),
+                ..Tx::new(vec![insert("c1", json!({}))])
+            })
+            .unwrap();
+        assert_eq!(replayed, recorded);
+    }
+}
+
+#[test]
+fn a_long_lived_store_finishes_a_journal_left_by_a_crash() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = seeded_store(temp.path());
+    let output = run(crash_writer(
+        temp.path(),
+        &[("PLAINDB_TEST_CRASH_AFTER", "2".to_owned())],
+    ));
+    assert!(!output.status.success());
+    assert!(journal_path(temp.path()).exists());
+    store
+        .apply(Tx::new(vec![insert("later", json!({}))]))
+        .unwrap();
+    assert!(!journal_path(temp.path()).exists());
+    assert_committed(&store);
+    assert!(store.get("main", "items", "later").unwrap().is_some());
+}
+
+#[test]
+fn opening_while_a_writer_holds_the_lock_leaves_its_journal_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let before = documents(temp.path());
+    let mut child = crash_writer(
+        temp.path(),
+        &[("PLAINDB_TEST_HOLD_LOCK_MS", "1500".to_owned())],
+    )
+    .spawn()
+    .unwrap();
+    wait_for(&journal_path(temp.path()), &mut child);
+    let journal = fs::read(journal_path(temp.path())).unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(fs::read(journal_path(temp.path())).unwrap(), journal);
+    assert_eq!(documents(temp.path()), before);
+    assert!(store.get("main", "items", "c1").unwrap().is_none());
+    assert!(child.wait().unwrap().success());
+    assert!(!journal_path(temp.path()).exists());
+    assert_committed(&store);
+}

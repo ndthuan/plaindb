@@ -18,8 +18,8 @@ use crate::snapshot::{
 use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 use crate::version::version_of;
 
-const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"];
-const GENERATION_FILE: &str = "generation";
+pub(crate) const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"];
+pub const GENERATION_FILE: &str = "generation";
 
 pub fn full_scan(root: &Path) -> Result<Snapshot> {
     rescan(root, &Snapshot::default())
@@ -79,6 +79,57 @@ fn read_meta(dir: &Path) -> Result<CollectionMeta> {
     })
 }
 
+pub(crate) fn compile_validator(
+    meta: &CollectionMeta,
+    dir: &Path,
+) -> Result<Option<jsonschema::Validator>> {
+    match &meta.schema {
+        Some(schema) => Ok(Some(jsonschema::validator_for(schema).map_err(
+            |source| {
+                Error::invalid_document("invalid_schema", source.to_string())
+                    .with_detail("path", dir.join(META_FILE).display().to_string())
+            },
+        )?)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(unix)]
+fn inode_of(metadata: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn inode_of(_metadata: &fs::Metadata) -> u64 {
+    0
+}
+
+pub(crate) fn file_entry(
+    path: &Path,
+    stem: &str,
+    meta: &CollectionMeta,
+    validator: Option<&jsonschema::Validator>,
+    bytes: &[u8],
+    metadata: &fs::Metadata,
+) -> FileEntry {
+    let mut entry = FileEntry {
+        id: stem.to_owned(),
+        size: 0,
+        mtime_ns: 0,
+        inode: 0,
+        outcome: load(path, stem, meta, validator, bytes),
+    };
+    stamp(&mut entry, metadata);
+    entry
+}
+
+pub(crate) fn stamp(entry: &mut FileEntry, metadata: &fs::Metadata) {
+    entry.size = metadata.len();
+    entry.mtime_ns = modified_ns(metadata);
+    entry.inode = inode_of(metadata);
+}
+
 fn modified_ns(metadata: &fs::Metadata) -> i128 {
     metadata
         .modified()
@@ -91,13 +142,7 @@ fn modified_ns(metadata: &fs::Metadata) -> i128 {
 fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<CollectionSnapshot> {
     let meta = read_meta(dir)?;
     let reusable = prev.filter(|snapshot| snapshot.meta == meta);
-    let validator = match &meta.schema {
-        Some(schema) => Some(jsonschema::validator_for(schema).map_err(|source| {
-            Error::invalid_document("invalid_schema", source.to_string())
-                .with_detail("path", dir.join(META_FILE).display().to_string())
-        })?),
-        None => None,
-    };
+    let validator = compile_validator(&meta, dir)?;
     let suffix = format!(".{}", meta.format.extension());
     let mut files = RedBlackTreeMapSync::new_sync();
     for entry in fs::read_dir(dir)? {
@@ -119,11 +164,13 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
             Err(source) if source.kind() == ErrorKind::NotFound => continue,
             Err(source) => return Err(source.into()),
         };
-        let size = metadata.len();
-        let mtime_ns = modified_ns(&metadata);
         let previous = reusable
             .and_then(|snapshot| snapshot.files.get(&name))
-            .filter(|known| known.size == size && known.mtime_ns == mtime_ns);
+            .filter(|known| {
+                known.size == metadata.len()
+                    && known.mtime_ns == modified_ns(&metadata)
+                    && known.inode == inode_of(&metadata)
+            });
         let file_entry = match previous {
             Some(known) => known.clone(),
             None => {
@@ -133,12 +180,7 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
                     Err(source) if source.kind() == ErrorKind::NotFound => continue,
                     Err(source) => return Err(source.into()),
                 };
-                FileEntry {
-                    id: stem.to_owned(),
-                    size,
-                    mtime_ns,
-                    outcome: load(&path, stem, &meta, validator.as_ref(), &bytes),
-                }
+                file_entry(&path, stem, &meta, validator.as_ref(), &bytes, &metadata)
             }
         };
         files.insert_mut(name, file_entry);
@@ -151,7 +193,7 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
     })
 }
 
-fn find_case_duplicates(
+pub(crate) fn find_case_duplicates(
     files: &RedBlackTreeMapSync<String, FileEntry>,
 ) -> RedBlackTreeSetSync<String> {
     let mut groups: HashMap<String, Vec<&String>> = HashMap::new();
@@ -215,4 +257,65 @@ fn load(
         doc: Arc::new(doc),
         id_mismatch,
     })
+}
+
+pub(crate) struct FileRef<'a> {
+    pub db: &'a str,
+    pub collection: &'a str,
+    pub file_name: &'a str,
+}
+
+fn read_present(path: &Path) -> Result<Option<(fs::Metadata, Vec<u8>)>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(source.into()),
+    };
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some((metadata, bytes))),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(source.into()),
+    }
+}
+
+pub(crate) fn refresh_files(
+    root: &Path,
+    prev: &Snapshot,
+    files: &[FileRef<'_>],
+) -> Result<Snapshot> {
+    let mut next = prev.clone();
+    for file in files {
+        let refreshed =
+            next.update_collection(file.db, file.collection, |collection| -> Result<()> {
+                let dir = root.join(file.db).join(file.collection);
+                let path = dir.join(file.file_name);
+                let suffix = format!(".{}", collection.meta.format.extension());
+                let Some(stem) = file.file_name.strip_suffix(&suffix) else {
+                    return Ok(());
+                };
+                match read_present(&path)? {
+                    Some((metadata, bytes)) => {
+                        let validator = compile_validator(&collection.meta, &dir)?;
+                        let entry = file_entry(
+                            &path,
+                            stem,
+                            &collection.meta,
+                            validator.as_ref(),
+                            &bytes,
+                            &metadata,
+                        );
+                        collection
+                            .files
+                            .insert_mut(file.file_name.to_owned(), entry);
+                    }
+                    None => {
+                        collection.files.remove_mut(file.file_name);
+                    }
+                }
+                collection.case_duplicates = find_case_duplicates(&collection.files);
+                Ok(())
+            });
+        refreshed.transpose()?;
+    }
+    Ok(next)
 }

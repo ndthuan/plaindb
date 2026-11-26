@@ -31,6 +31,7 @@ pub struct FileEntry {
     pub id: String,
     pub size: u64,
     pub mtime_ns: i128,
+    pub inode: u64,
     pub outcome: Outcome,
 }
 
@@ -73,6 +74,24 @@ pub struct DbSnapshot {
 pub struct Snapshot {
     pub generation: u64,
     pub dbs: RedBlackTreeMapSync<String, DbSnapshot>,
+}
+
+impl Snapshot {
+    pub(crate) fn update_collection<T>(
+        &mut self,
+        db: &str,
+        collection: &str,
+        update: impl FnOnce(&mut CollectionSnapshot) -> T,
+    ) -> Option<T> {
+        let mut db_snapshot = self.dbs.get(db)?.clone();
+        let mut collection_snapshot = db_snapshot.collections.get(collection)?.clone();
+        let outcome = update(&mut collection_snapshot);
+        db_snapshot
+            .collections
+            .insert_mut(collection.to_owned(), collection_snapshot);
+        self.dbs.insert_mut(db.to_owned(), db_snapshot);
+        Some(outcome)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
