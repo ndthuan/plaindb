@@ -5,6 +5,7 @@ use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
 
 use crate::codec::Doc;
 use crate::config::{CollectionMeta, Format};
+use crate::index::Indexes;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocEntry {
@@ -40,6 +41,7 @@ pub struct CollectionSnapshot {
     pub meta: CollectionMeta,
     pub files: RedBlackTreeMapSync<String, FileEntry>,
     pub case_duplicates: RedBlackTreeSetSync<String>,
+    pub indexes: Indexes,
 }
 
 impl CollectionSnapshot {
@@ -53,6 +55,14 @@ impl CollectionSnapshot {
 
     pub fn is_duplicate(&self, file_name: &str) -> bool {
         self.case_duplicates.contains(file_name)
+    }
+
+    pub fn readable(&self, id: &str) -> Option<&DocEntry> {
+        let name = self.file_name(id);
+        match &self.files.get(&name)?.outcome {
+            Outcome::Doc(doc) if !self.is_duplicate(&name) => Some(doc),
+            _ => None,
+        }
     }
 
     pub fn readable_docs(&self) -> impl Iterator<Item = (&String, &DocEntry)> {

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::config::{CollectionMeta, Format, IndexSpec, STORE_FORMAT, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
+use crate::index::Indexes;
 use crate::journal::{self, Journal, JournalEntry};
 use crate::names::{new_id, validate_collection_name, validate_db_name};
 use crate::scan::{self, SYSTEM_FIELDS, compile_validator};
@@ -119,6 +120,16 @@ impl Store {
         let _lock = self.begin_write()?;
         let mut meta = self.collection_meta(db, collection)?;
         meta.indexes = indexes;
+        {
+            let snapshot = self.snapshot.load();
+            if let Some(found) = snapshot
+                .dbs
+                .get(db)
+                .and_then(|entry| entry.collections.get(collection))
+            {
+                Indexes::validate_new(db, collection, &meta, found.files.values())?;
+            }
+        }
         self.write_meta(db, collection, &meta)
     }
 }

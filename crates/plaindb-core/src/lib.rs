@@ -4,6 +4,7 @@ pub mod codec;
 pub mod config;
 pub mod error;
 mod hooks;
+pub mod index;
 pub mod journal;
 mod jsontext;
 pub mod lock;

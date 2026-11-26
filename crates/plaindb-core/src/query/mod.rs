@@ -1,6 +1,7 @@
 mod cursor;
 mod filter;
 mod order;
+mod plan;
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -14,7 +15,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::snapshot::{CollectionSnapshot, DocEntry};
 use crate::store::{Store, Version};
 
-pub use filter::{Cond, Filter};
+pub use filter::{Cond, Filter, split_path};
+pub(crate) use filter::{crosses_array, elements, terminals};
 pub use order::{Key, compare};
 
 pub const DEFAULT_LIMIT: u64 = 100;
@@ -47,13 +49,20 @@ fn matched<'a>(
     filter: &Filter,
     limits: &Limits,
 ) -> Result<Vec<&'a DocEntry>> {
+    if let Some(ids) = plan::candidates(collection, filter) {
+        return Ok(ids
+            .iter()
+            .filter_map(|id| collection.readable(id))
+            .filter(|entry| filter.matches(&entry.doc))
+            .collect());
+    }
     let started = Instant::now();
     let budget = limits.max_scan_ms.map(Duration::from_millis);
     let mut found = Vec::new();
     for (index, (_, entry)) in collection.readable_docs().enumerate() {
         if let Some(budget) = budget
             && index % 64 == 0
-            && started.elapsed() > budget
+            && started.elapsed() >= budget
         {
             return Err(Error::new(
                 ErrorCode::LimitExceeded,

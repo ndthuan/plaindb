@@ -167,6 +167,22 @@ fn walk<'a>(value: &'a Value, path: &[String], out: &mut Vec<&'a Value>) {
     }
 }
 
+pub(crate) fn crosses_array(doc: &serde_json::Map<String, Value>, path: &[String]) -> bool {
+    let mut current: Option<&Value> = None;
+    for (index, part) in path.iter().enumerate() {
+        current = match (index, current) {
+            (0, _) => doc.get(part),
+            (_, Some(Value::Object(map))) => map.get(part),
+            (_, Some(Value::Array(_))) => return true,
+            _ => None,
+        };
+        if current.is_none() {
+            return false;
+        }
+    }
+    false
+}
+
 pub(crate) fn terminals<'a>(
     doc: &'a serde_json::Map<String, Value>,
     path: &[String],

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use crate::codec::{Doc, codec_for};
 use crate::error::{Error, ErrorCode, Result};
+use crate::index::PendingWrite;
 use crate::journal::{self, Journal, JournalEntry};
 use crate::lock::WriteLock;
 use crate::names::{new_id, validate_collection_name, validate_db_name, validate_id};
@@ -518,6 +519,27 @@ impl<'a> Planner<'a> {
     }
 }
 
+fn check_indexes(snapshot: &Snapshot, targets: &[Target]) -> Result<()> {
+    let mut groups: BTreeMap<(&str, &str), Vec<PendingWrite<'_>>> = BTreeMap::new();
+    for target in targets {
+        let doc = target.next.as_ref().map(|pending| &*pending.doc);
+        groups
+            .entry((&target.db, &target.collection))
+            .or_default()
+            .push((&target.id, doc));
+    }
+    for ((db, collection), writes) in groups {
+        let found = snapshot
+            .dbs
+            .get(db)
+            .and_then(|entry| entry.collections.get(collection));
+        if let Some(found) = found {
+            found.indexes.check_writes(db, collection, &writes)?;
+        }
+    }
+    Ok(())
+}
+
 fn read_version(path: &std::path::Path) -> Result<Option<String>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(version_of(&bytes))),
@@ -577,6 +599,7 @@ impl Store {
                 results,
             });
         }
+        check_indexes(&snapshot, &targets)?;
         self.check_disk(&snapshot, &targets)?;
         let generation = snapshot.generation + 1;
         let result = TxResult {
@@ -659,11 +682,8 @@ impl Store {
                 }
                 None => None,
             };
-            next.update_collection(&target.db, &target.collection, |collection| match entry {
-                Some(entry) => collection.files.insert_mut(target.file_name.clone(), entry),
-                None => {
-                    collection.files.remove_mut(&target.file_name);
-                }
+            next.update_collection(&target.db, &target.collection, |collection| {
+                collection.put_file(&target.file_name, entry);
             });
             touched.insert((&target.db, &target.collection));
         }

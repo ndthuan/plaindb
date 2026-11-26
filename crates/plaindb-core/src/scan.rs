@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::codec::{Doc, codec_for};
 use crate::config::{CollectionMeta, STORE_FORMAT, from_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
+use crate::index::Indexes;
 use crate::names::validate_id;
 use crate::snapshot::{
     CollectionSnapshot, DbSnapshot, DocEntry, FileEntry, Invalid, Outcome, Snapshot,
@@ -145,6 +146,7 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
     let validator = compile_validator(&meta, dir)?;
     let suffix = format!(".{}", meta.format.extension());
     let mut files = RedBlackTreeMapSync::new_sync();
+    let mut changed = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -174,6 +176,7 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
         let file_entry = match previous {
             Some(known) => known.clone(),
             None => {
+                changed.push(name.clone());
                 let path = entry.path();
                 let bytes = match fs::read(&path) {
                     Ok(bytes) => bytes,
@@ -186,10 +189,28 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
         files.insert_mut(name, file_entry);
     }
     let case_duplicates = find_case_duplicates(&files);
+    let indexes = match reusable {
+        Some(known) => {
+            let mut indexes = known.indexes.clone();
+            for (name, old) in known.files.iter() {
+                if !files.contains_key(name) {
+                    indexes.apply(Some(old), None);
+                }
+            }
+            for name in &changed {
+                if let Some(new) = files.get(name) {
+                    indexes.apply(known.files.get(name), Some(new));
+                }
+            }
+            indexes
+        }
+        None => Indexes::build(&meta, files.values())?,
+    };
     Ok(CollectionSnapshot {
         meta,
         files,
         case_duplicates,
+        indexes,
     })
 }
 
@@ -304,13 +325,9 @@ pub(crate) fn refresh_files(
                             &bytes,
                             &metadata,
                         );
-                        collection
-                            .files
-                            .insert_mut(file.file_name.to_owned(), entry);
+                        collection.put_file(file.file_name, Some(entry));
                     }
-                    None => {
-                        collection.files.remove_mut(file.file_name);
-                    }
+                    None => collection.put_file(file.file_name, None),
                 }
                 collection.case_duplicates = find_case_duplicates(&collection.files);
                 Ok(())
