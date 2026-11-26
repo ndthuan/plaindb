@@ -1,5 +1,6 @@
 mod admin;
 pub mod atomic;
+mod boot;
 pub mod cache;
 pub mod codec;
 pub mod config;
@@ -23,8 +24,8 @@ pub mod write;
 pub use atomic::{remove_durable, write_atomic};
 pub use codec::{Codec, Doc, codec_for};
 pub use config::{
-    CollectionMeta, CommitMode, DEFAULT_LOCK_TIMEOUT_MS, Durability, Format, IndexSpec, Limits,
-    PushMode, STORE_FORMAT, StoreConfig,
+    CollectionMeta, CommitMode, DEFAULT_CHECKPOINT_INTERVAL, DEFAULT_LOCK_TIMEOUT_MS, Durability,
+    Format, IndexSpec, Limits, PushMode, STORE_FORMAT, StoreConfig,
 };
 pub use error::{Error, ErrorCode, Result};
 pub use git::{At, CommitId, DEFAULT_HISTORY_LIMIT, GitStatus, HistoryEntry, PushOutcome};

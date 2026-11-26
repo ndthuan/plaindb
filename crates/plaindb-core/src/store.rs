@@ -20,25 +20,44 @@ use crate::lock::WriteLock;
 use crate::names::{validate_collection_name, validate_db_name, validate_id};
 use crate::scan;
 use crate::snapshot::{CollectionSnapshot, InvalidFile, Outcome, Snapshot, Status, Warning};
-use crate::txlog::TxLog;
+use crate::txlog::{FileStamp, TxLog};
+use crate::write::TxResult;
 
 pub const STORE_FILE: &str = "_store.json";
 pub const DB_FILE: &str = "_db.json";
 pub const META_FILE: &str = "_meta.json";
 pub const STATE_DIR: &str = ".plaindb";
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct WriterState {
     pub durability: Durability,
+    pub checkpoint_interval: u64,
     pub tx_log: TxLog,
+    pub journal_seen: Option<Option<FileStamp>>,
+    pub journaled: Vec<TxResult>,
 }
 
 impl WriterState {
-    fn new(durability: Durability) -> Self {
+    fn new(config: &StoreConfig) -> Self {
         Self {
-            durability,
+            durability: config.durability,
+            checkpoint_interval: config.checkpoint_interval,
             tx_log: TxLog::default(),
+            journal_seen: None,
+            journaled: Vec::new(),
         }
+    }
+
+    pub(crate) fn configure(&mut self, config: &StoreConfig) {
+        self.durability = config.durability;
+        self.checkpoint_interval = config.checkpoint_interval;
+    }
+
+    pub(crate) fn find_tx(&mut self, root: &Path, tx_id: &str) -> Result<Option<TxResult>> {
+        if let Some(found) = self.journaled.iter().find(|result| result.tx_id == tx_id) {
+            return Ok(Some(found.clone()));
+        }
+        self.tx_log.find(root, tx_id)
     }
 }
 
@@ -122,6 +141,11 @@ fn open_snapshot(root: &Path) -> Result<Snapshot> {
 
 impl Drop for Store {
     fn drop(&mut self) {
+        if journal::has_records(&self.root)
+            && let Err(error) = self.checkpoint_if_free()
+        {
+            tracing::warn!("the checkpoint on close failed: {}", error.message);
+        }
         let snapshot = self.snapshot.load();
         if cache::stored_generation(&self.root).is_none_or(|stored| snapshot.generation > stored) {
             let _ = cache::write(&self.root, &snapshot);
@@ -180,7 +204,7 @@ impl Store {
             config.durability,
         )?;
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
-        let writer = Mutex::new(WriterState::new(config.durability));
+        let writer = Mutex::new(WriterState::new(&config));
         let store = Self {
             root,
             config,
@@ -196,7 +220,7 @@ impl Store {
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let root = dir.as_ref().to_path_buf();
         let config = read_config(&root)?;
-        let mut writer = WriterState::new(config.durability);
+        let mut writer = WriterState::new(&config);
         if let Some(_lock) = WriteLock::try_acquire(&root)? {
             journal::recover(&root, &mut writer)?;
             git::prepare_write(&root)?;
@@ -208,6 +232,22 @@ impl Store {
             snapshot,
             writer: Mutex::new(writer),
         })
+    }
+
+    pub fn checkpoint(&self) -> Result<()> {
+        let _lock = self.begin_write()?;
+        journal::checkpoint(&self.root, &mut self.writer())
+    }
+
+    fn checkpoint_if_free(&self) -> Result<()> {
+        let Some(_lock) = WriteLock::try_acquire(&self.root)? else {
+            return Ok(());
+        };
+        let config = read_config(&self.root)?;
+        let mut writer = self.writer();
+        writer.configure(&config);
+        journal::settle(&self.root, &mut writer)?;
+        journal::checkpoint(&self.root, &mut writer)
     }
 
     pub(crate) fn writer(&self) -> MutexGuard<'_, WriterState> {

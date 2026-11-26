@@ -101,28 +101,34 @@ impl TxLog {
             .map(|record| record.result.clone()))
     }
 
-    pub(crate) fn record(
+    pub(crate) fn record_all(
         &mut self,
         root: &Path,
-        result: &TxResult,
+        results: &[&TxResult],
         durability: Durability,
     ) -> Result<()> {
         self.sync(root)?;
-        if self
-            .records
-            .iter()
-            .any(|record| record.tx_id == result.tx_id)
-        {
+        let mut appended = String::new();
+        for result in results {
+            if self
+                .records
+                .iter()
+                .any(|record| record.tx_id == result.tx_id)
+            {
+                continue;
+            }
+            let record = Record {
+                tx_id: result.tx_id.clone(),
+                result: (*result).clone(),
+            };
+            appended.push_str(&line_of(&record));
+            self.records.push_back(record);
+        }
+        if appended.is_empty() {
             return Ok(());
         }
-        let record = Record {
-            tx_id: result.tx_id.clone(),
-            result: result.clone(),
-        };
-        let line = line_of(&record);
         let path = log_path(root);
         self.loaded = None;
-        self.records.push_back(record);
         if self.records.len() > TX_LOG_KEPT + TX_LOG_SLACK {
             let excess = self.records.len() - TX_LOG_KEPT;
             self.records.drain(..excess);
@@ -133,7 +139,7 @@ impl TxLog {
             if !self.ends_with_newline {
                 file.write_all(b"\n")?;
             }
-            file.write_all(line.as_bytes())?;
+            file.write_all(appended.as_bytes())?;
             flush(&file, durability)?;
         }
         self.ends_with_newline = true;

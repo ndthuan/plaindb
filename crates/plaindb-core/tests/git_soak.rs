@@ -162,7 +162,12 @@ fn three_writers_through_a_crash_a_foreign_commit_and_a_remote_that_got_ahead() 
     store.set_push(PushMode::OnCommit).unwrap();
 
     let crashed = crash_one(&root, &crash_log);
-    assert!(root.join(".plaindb/journal.json").exists());
+    assert!(
+        fs::metadata(root.join(".plaindb/journal.jsonl"))
+            .unwrap()
+            .len()
+            > 0
+    );
 
     run_writers(&root, &logs, PER_PHASE);
     assert_in_sync(&root, &remote);

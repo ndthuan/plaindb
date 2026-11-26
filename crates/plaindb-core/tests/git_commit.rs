@@ -348,8 +348,9 @@ fn a_hand_commit_builds_on_the_index_plaindb_keeps() {
 }
 
 fn journal_tx_id(root: &Path) -> String {
-    let journal: Value =
-        serde_json::from_slice(&fs::read(root.join(".plaindb/journal.json")).unwrap()).unwrap();
+    let text = fs::read_to_string(root.join(".plaindb/journal.jsonl")).unwrap();
+    let last = text.lines().last().unwrap();
+    let journal: Value = serde_json::from_str(last.split_once(' ').unwrap().1).unwrap();
     assert_eq!(journal["commit_pending"], json!(true));
     journal["tx_id"].as_str().unwrap().to_owned()
 }
@@ -386,7 +387,12 @@ fn a_crash_before_the_commit_is_committed_at_next_open() {
     let tx_id = journal_tx_id(root);
     assert_eq!(subjects(root).len(), before);
     let store = Store::open(root).unwrap();
-    assert!(!root.join(".plaindb/journal.json").exists());
+    assert_eq!(
+        fs::metadata(root.join(".plaindb/journal.jsonl"))
+            .unwrap()
+            .len(),
+        0
+    );
     assert_eq!(subjects(root).len(), before + 1);
     assert_eq!(subjects(root)[0], "tx main: 5 ops");
     assert!(parsed_trailers(root, "HEAD").contains(&format!("Plaindb-Tx-Id: {tx_id}")));

@@ -553,10 +553,10 @@ fn read_version(path: &std::path::Path) -> Result<Option<String>> {
 impl Store {
     pub(crate) fn begin_write(&self) -> Result<WriteLock> {
         let lock = WriteLock::acquire(&self.root, self.lock_timeout())?;
-        let durability = read_config(&self.root)?.durability;
+        let config = read_config(&self.root)?;
         let mut writer = self.writer();
-        writer.durability = durability;
-        journal::recover(&self.root, &mut writer)?;
+        writer.configure(&config);
+        journal::settle(&self.root, &mut writer)?;
         drop(writer);
         let foreign = git::prepare_write(&self.root)?;
         let current = self.snapshot.load_full();
@@ -584,7 +584,7 @@ impl Store {
             None => new_id(),
         };
         let _lock = self.begin_write()?;
-        if supplied && let Some(found) = self.writer().tx_log.find(&self.root, &tx_id)? {
+        if supplied && let Some(found) = self.writer().find_tx(&self.root, &tx_id)? {
             return Ok(found);
         }
         let snapshot = self.snapshot.load_full();

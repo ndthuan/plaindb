@@ -168,7 +168,12 @@ fn every_write_bumps_the_generation() {
     assert_eq!(second.generation, before + 2);
     assert_eq!(read_generation(temp.path()).unwrap(), before + 2);
     assert_eq!(store.snapshot().generation, before + 2);
-    assert!(!temp.path().join(".plaindb").join("journal.json").exists());
+    let journal =
+        fs::read_to_string(temp.path().join(".plaindb").join("journal.jsonl")).unwrap_or_default();
+    for line in journal.lines() {
+        let record: Value = serde_json::from_str(line.split_once(' ').unwrap().1).unwrap();
+        assert!(record["generation"].as_u64().unwrap() <= before + 2);
+    }
 }
 
 #[test]
@@ -587,6 +592,7 @@ fn the_transaction_log_keeps_the_last_thousand() {
     };
     assert_eq!(replay(&ids[0]).results[0].id, "seeded");
     one(&store, insert("users", "ann", json!({}))).unwrap();
+    store.checkpoint().unwrap();
     let lines = fs::read_to_string(&log_path).unwrap().lines().count();
     assert_eq!(lines, 1_000);
     assert_eq!(replay(&ids[0]).results[0].id, "fresh");

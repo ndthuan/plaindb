@@ -110,14 +110,21 @@ fn two_processes_patching_one_document_never_both_win() {
 fn a_held_lock_times_out_after_five_seconds() {
     let temp = tempfile::tempdir().unwrap();
     let store = items_store(temp.path());
+    store.checkpoint().unwrap();
     let mut child = writer(temp.path(), "tx", 1)
         .env("PLAINDB_TEST_HOLD_LOCK_MS", "7000")
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
-    let journal = temp.path().join(".plaindb").join("journal.json");
+    let journal = temp.path().join(".plaindb").join("journal.jsonl");
+    let lines = || {
+        std::fs::read_to_string(&journal)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
     let waiting = Instant::now();
-    while !journal.exists() {
+    while lines() == 0 {
         assert!(child.try_wait().unwrap().is_none());
         assert!(waiting.elapsed() < Duration::from_secs(30));
         std::thread::sleep(Duration::from_millis(5));

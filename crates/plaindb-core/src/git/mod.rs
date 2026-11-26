@@ -277,6 +277,7 @@ impl GitPlan {
             commit_pending: self.commit_message.is_some(),
             commit_message: self.commit_message,
             pending_tx: self.pending,
+            boot: crate::boot::boot_id(),
         }
     }
 }

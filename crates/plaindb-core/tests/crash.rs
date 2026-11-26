@@ -62,7 +62,27 @@ fn documents(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 fn journal_path(root: &Path) -> PathBuf {
-    root.join(".plaindb").join("journal.json")
+    root.join(".plaindb").join("journal.jsonl")
+}
+
+fn journal_records(root: &Path) -> Vec<Value> {
+    fs::read_to_string(journal_path(root))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line.split_once(' ').unwrap().1).unwrap())
+        .collect()
+}
+
+fn unfinished_records(root: &Path) -> Vec<Value> {
+    let generation = read_generation(root).unwrap();
+    journal_records(root)
+        .into_iter()
+        .filter(|record| record["generation"].as_u64().unwrap() > generation)
+        .collect()
+}
+
+fn journal_is_empty(root: &Path) -> bool {
+    fs::metadata(journal_path(root)).map_or(true, |metadata| metadata.len() == 0)
 }
 
 fn crash_writer(root: &Path, env: &[(&str, String)]) -> Command {
@@ -82,9 +102,9 @@ fn run(mut command: Command) -> Output {
     command.output().unwrap()
 }
 
-fn wait_for(path: &Path, child: &mut Child) {
+fn wait_for_record(root: &Path, child: &mut Child) {
     let started = Instant::now();
-    while !path.exists() {
+    while journal_records(root).is_empty() {
         assert!(
             child.try_wait().unwrap().is_none(),
             "the writer exited before the journal appeared"
@@ -115,7 +135,7 @@ fn a_crash_before_the_journal_leaves_the_store_untouched() {
         &[("PLAINDB_TEST_CRASH_BEFORE_JOURNAL", "1".to_owned())],
     ));
     assert!(!output.status.success());
-    assert!(!journal_path(temp.path()).exists());
+    assert!(journal_is_empty(temp.path()));
     let store = Store::open(temp.path()).unwrap();
     assert_eq!(documents(temp.path()), before);
     assert_eq!(read_generation(temp.path()).unwrap(), generation);
@@ -134,10 +154,9 @@ fn a_crash_after_any_number_of_files_rolls_forward_on_open() {
             &[("PLAINDB_TEST_CRASH_AFTER", applied.to_string())],
         ));
         assert!(!output.status.success(), "after {applied}");
-        let journal: Value =
-            serde_json::from_slice(&fs::read(journal_path(temp.path())).unwrap()).unwrap();
+        let journal = unfinished_records(temp.path()).pop().unwrap();
         let store = Store::open(temp.path()).unwrap();
-        assert!(!journal_path(temp.path()).exists(), "after {applied}");
+        assert!(journal_is_empty(temp.path()), "after {applied}");
         assert_committed(&store);
         assert_eq!(read_generation(temp.path()).unwrap(), generation + 1);
         let state = fs::read_dir(temp.path().join(".plaindb"))
@@ -166,11 +185,11 @@ fn a_long_lived_store_finishes_a_journal_left_by_a_crash() {
         &[("PLAINDB_TEST_CRASH_AFTER", "2".to_owned())],
     ));
     assert!(!output.status.success());
-    assert!(journal_path(temp.path()).exists());
+    assert_eq!(unfinished_records(temp.path()).len(), 1);
     store
         .apply(Tx::new(vec![insert("later", json!({}))]))
         .unwrap();
-    assert!(!journal_path(temp.path()).exists());
+    assert!(unfinished_records(temp.path()).is_empty());
     assert_committed(&store);
     assert!(store.get("main", "items", "later").unwrap().is_some());
 }
@@ -186,13 +205,120 @@ fn opening_while_a_writer_holds_the_lock_leaves_its_journal_alone() {
     )
     .spawn()
     .unwrap();
-    wait_for(&journal_path(temp.path()), &mut child);
+    wait_for_record(temp.path(), &mut child);
     let journal = fs::read(journal_path(temp.path())).unwrap();
     let store = Store::open(temp.path()).unwrap();
     assert_eq!(fs::read(journal_path(temp.path())).unwrap(), journal);
     assert_eq!(documents(temp.path()), before);
     assert!(store.get("main", "items", "c1").unwrap().is_none());
     assert!(child.wait().unwrap().success());
-    assert!(!journal_path(temp.path()).exists());
+    assert!(journal_is_empty(temp.path()));
     assert_committed(&store);
+}
+
+fn captured_writer(root: &Path, env: &[(&str, String)]) -> Command {
+    let mut command = crash_writer(root, env);
+    command.stdout(Stdio::piped());
+    command
+}
+
+#[test]
+fn a_crash_at_any_checkpoint_step_loses_nothing() {
+    for step in 0..=3 {
+        let temp = tempfile::tempdir().unwrap();
+        seeded_store(temp.path());
+        let generation = read_generation(temp.path()).unwrap();
+        let recorded = written_but_not_checkpointed(temp.path(), step);
+        let store = Store::open(temp.path()).unwrap();
+        assert!(journal_is_empty(temp.path()), "at step {step}");
+        assert_committed(&store);
+        assert_eq!(read_generation(temp.path()).unwrap(), generation + 1);
+        let replayed = store
+            .apply(Tx {
+                id: Some(recorded.tx_id.clone()),
+                ..Tx::new(vec![insert("c1", json!({}))])
+            })
+            .unwrap();
+        assert_eq!(replayed, recorded, "at step {step}");
+    }
+}
+
+fn written_but_not_checkpointed(root: &Path, step: usize) -> TxResult {
+    let output = run(captured_writer(
+        root,
+        &[("PLAINDB_TEST_CRASH_IN_CHECKPOINT", step.to_string())],
+    ));
+    assert!(!output.status.success(), "at step {step}");
+    let tx_id = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    assert!(unfinished_records(root).is_empty(), "at step {step}");
+    let found = journal_records(root)
+        .into_iter()
+        .find(|record| record["tx_id"] == json!(tx_id));
+    let tx_log = fs::read_to_string(root.join(".plaindb").join("tx-log.jsonl")).unwrap_or_default();
+    let logged = tx_log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["tx_id"] == json!(tx_id));
+    let result = found.or(logged).expect("the transaction is recorded")["result"].clone();
+    serde_json::from_value(result).unwrap()
+}
+
+#[test]
+fn files_lost_after_the_commit_are_written_again_on_open() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let items = temp.path().join("main").join("items");
+    let old_a = fs::read(items.join("a.json")).unwrap();
+    let old_b = fs::read(items.join("b.json")).unwrap();
+    written_but_not_checkpointed(temp.path(), 0);
+    fs::write(items.join("a.json"), &old_a).unwrap();
+    fs::write(items.join("b.json"), &old_b).unwrap();
+    fs::remove_file(items.join("c1.json")).unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_committed(&store);
+}
+
+fn open_after_a_reboot(root: &Path) {
+    let output = Command::new(WRITER)
+        .arg(root)
+        .arg("open")
+        .env("PLAINDB_TEST_BOOT_ID", "another-boot")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_file_removed_by_hand_after_the_commit_stays_removed() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    written_but_not_checkpointed(temp.path(), 0);
+    let path = temp.path().join("main").join("items").join("c1.json");
+    fs::remove_file(&path).unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert!(!path.exists());
+    assert!(store.get("main", "items", "c1").unwrap().is_none());
+}
+
+#[test]
+fn a_hand_edit_after_the_commit_survives_the_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    written_but_not_checkpointed(temp.path(), 0);
+    let path = temp.path().join("main").join("items").join("c1.json");
+    let edited = "{\n  \"_id\": \"c1\",\n  \"v\": 9\n}\n";
+    fs::write(&path, edited).unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    let (found, _) = store.get("main", "items", "c1").unwrap().unwrap();
+    assert_eq!(found["v"], json!(9));
 }

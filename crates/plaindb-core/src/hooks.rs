@@ -45,6 +45,18 @@ mod enabled {
         }
     }
 
+    pub(crate) fn boot_id() -> Option<String> {
+        var("PLAINDB_TEST_BOOT_ID")
+    }
+
+    pub(crate) fn during_checkpoint(step: usize) {
+        if var("PLAINDB_TEST_CRASH_IN_CHECKPOINT").and_then(|text| text.parse::<usize>().ok())
+            == Some(step)
+        {
+            crash();
+        }
+    }
+
     pub(crate) fn before_git_commit() {
         if var("PLAINDB_TEST_CRASH_BEFORE_COMMIT").as_deref() == Some("1") {
             crash();
@@ -68,6 +80,12 @@ mod enabled {
 
     pub(crate) fn after_files(_applied: usize) {}
 
+    pub(crate) fn boot_id() -> Option<String> {
+        None
+    }
+
+    pub(crate) fn during_checkpoint(_step: usize) {}
+
     pub(crate) fn before_git_commit() {}
 
     pub(crate) fn after_git_commit() {}
@@ -76,5 +94,6 @@ mod enabled {
 #[cfg(feature = "test-hooks")]
 pub use enabled::full_flush_count;
 pub(crate) use enabled::{
-    after_files, after_git_commit, after_journal, before_git_commit, before_journal, full_flush,
+    after_files, after_git_commit, after_journal, before_git_commit, before_journal, boot_id,
+    during_checkpoint, full_flush,
 };

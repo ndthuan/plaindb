@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use plaindb_core::{
-    Format, Store, TxResult, WriteLock, codec_for, scan::read_generation, version_of,
+    Format, Store, StoreConfig, TxResult, WriteLock, codec_for, scan::read_generation, version_of,
 };
 use serde_json::{Value, json};
 
@@ -15,6 +15,9 @@ const WRITER: &str = env!("CARGO_BIN_EXE_plaindb-test-writer");
 const CHILDREN: usize = 4;
 const TRANSACTIONS: u64 = 1_000;
 const KILLS: usize = 50;
+const CHECKPOINT_INTERVAL: u64 = 4;
+const CHECKPOINT_CRASH_EVERY: usize = 5;
+const CRASH_STATUS: i32 = 86;
 const COLLECTIONS: [(&str, Format); 3] = [
     ("docs", Format::Json),
     ("cards", Format::Yaml),
@@ -36,7 +39,15 @@ struct Slot {
 }
 
 fn spawn(root: &Path, log: &Path, count: u64) -> Child {
-    Command::new(WRITER)
+    spawn_crashing(root, log, count, None)
+}
+
+fn spawn_crashing(root: &Path, log: &Path, count: u64, checkpoint_step: Option<u64>) -> Child {
+    let mut command = Command::new(WRITER);
+    if let Some(step) = checkpoint_step {
+        command.env("PLAINDB_TEST_CRASH_IN_CHECKPOINT", step.to_string());
+    }
+    command
         .arg(root)
         .arg("soak")
         .arg(count.to_string())
@@ -68,13 +79,28 @@ fn unfinished(log: &Path) -> Option<(String, Vec<String>)> {
     Some((tx_id, collections))
 }
 
+fn journal_records(root: &Path) -> Vec<Value> {
+    fs::read_to_string(root.join(".plaindb").join("journal.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line.split_once(' ')?.1).ok())
+        .collect()
+}
+
+fn has_unfinished_record(root: &Path) -> bool {
+    let generation = read_generation(root).unwrap();
+    journal_records(root)
+        .iter()
+        .any(|journal| journal["generation"].as_u64().unwrap() > generation)
+}
+
 fn settle(root: &Path, tx_id: &str) -> Option<TxResult> {
     let state = root.join(".plaindb");
-    if let Ok(bytes) = fs::read(state.join("journal.json")) {
-        let journal: Value = serde_json::from_slice(&bytes).unwrap();
-        if journal["tx_id"] == json!(tx_id) {
-            return Some(serde_json::from_value(journal["result"].clone()).unwrap());
-        }
+    if let Some(journal) = journal_records(root)
+        .into_iter()
+        .find(|journal| journal["tx_id"] == json!(tx_id))
+    {
+        return Some(serde_json::from_value(journal["result"].clone()).unwrap());
     }
     fs::read_to_string(state.join("tx-log.jsonl"))
         .unwrap_or_default()
@@ -101,7 +127,7 @@ fn hand_edit(
     marker: u64,
 ) -> Option<(u64, String, String, String)> {
     let _lock = WriteLock::acquire(root, Duration::from_secs(30)).unwrap();
-    if root.join(".plaindb").join("journal.json").exists() {
+    if has_unfinished_record(root) {
         return None;
     }
     let (collection, format) = COLLECTIONS[usize::try_from(random.below(3)).unwrap()];
@@ -158,7 +184,14 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     let root = temp.path().join("store");
     let logs = temp.path().join("logs");
     fs::create_dir_all(&logs).unwrap();
-    let store = Store::init(&root).unwrap();
+    let store = Store::init_with(
+        &root,
+        StoreConfig {
+            checkpoint_interval: CHECKPOINT_INTERVAL,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
     store.create_db("main").unwrap();
     for (collection, format) in COLLECTIONS {
         store.create_collection("main", collection, format).unwrap();
@@ -176,6 +209,7 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     let mut settled: Vec<(Vec<String>, TxResult)> = Vec::new();
     let mut edits: Vec<(u64, String, String, String)> = Vec::new();
     let mut kills = 0;
+    let mut checkpoint_crashes = 0;
     let started = Instant::now();
     let total = TRANSACTIONS * CHILDREN as u64;
     let kill_spacing = total * 9 / 10 / KILLS as u64;
@@ -212,11 +246,27 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
                 settled.push((collections, result));
             }
             let remaining = TRANSACTIONS - begun(&slot.log);
-            slot.child = spawn(&root, &slot.log, remaining);
+            let step = kills
+                .is_multiple_of(CHECKPOINT_CRASH_EVERY)
+                .then_some((kills / CHECKPOINT_CRASH_EVERY) as u64 % 4);
+            slot.child = spawn_crashing(&root, &slot.log, remaining, step);
         }
         let mut running = false;
         for slot in &mut slots {
-            running |= slot.child.try_wait().unwrap().is_none();
+            let status = slot.child.try_wait().unwrap();
+            if status.is_none() {
+                running = true;
+            } else if status.and_then(|status| status.code()) == Some(CRASH_STATUS) {
+                checkpoint_crashes += 1;
+                if let Some((tx_id, collections)) = unfinished(&slot.log)
+                    && let Some(result) = settle(&root, &tx_id)
+                {
+                    settled.push((collections, result));
+                }
+                let remaining = TRANSACTIONS - begun(&slot.log);
+                slot.child = spawn(&root, &slot.log, remaining);
+                running = true;
+            }
         }
         if !running {
             break;
@@ -233,6 +283,10 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
         assert_eq!(begun(&slot.log), TRANSACTIONS);
     }
     assert_eq!(kills, KILLS);
+    assert!(
+        checkpoint_crashes >= 4,
+        "only {checkpoint_crashes} crashes in a checkpoint"
+    );
     assert!(edits.len() > 100, "only {} hand edits", edits.len());
 
     let mut events: Vec<(u64, u64, String, String, Event)> = Vec::new();
@@ -287,7 +341,7 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     }
 
     let reopened = Store::open(&root).unwrap();
-    assert!(!root.join(".plaindb").join("journal.json").exists());
+    assert!(journal_records(&root).is_empty());
     let generation = read_generation(&root).unwrap();
     assert!(generation > 0);
     for (collection, format) in COLLECTIONS {

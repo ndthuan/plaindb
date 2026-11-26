@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 use base64::Engine;
@@ -8,18 +8,21 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::atomic::{
-    parent_of, place, remove_temp_files, remove_tree_at, replace_unsynced, sync_dir, unlink,
-    write_atomic_at,
+    flush, parent_of, place, place_ordered, remove_temp_files, remove_tree, replace_unsynced,
+    sync_dir, unlink,
 };
+use crate::boot::boot_id;
 use crate::config::Durability;
 use crate::error::{Error, ErrorCode, Result};
 use crate::git::{PendingTx, commit_journal};
 use crate::hooks;
 use crate::scan::{GENERATION_FILE, read_generation};
 use crate::store::{STATE_DIR, WriterState};
+use crate::txlog::file_stamp;
+use crate::version::version_of;
 use crate::write::TxResult;
 
-pub const JOURNAL_FILE: &str = "journal.json";
+pub const JOURNAL_FILE: &str = "journal.jsonl";
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -79,47 +82,69 @@ impl JournalEntry {
         }
     }
 
-    fn apply(
-        &self,
-        root: &Path,
-        durability: Durability,
-        dirty: &mut BTreeSet<PathBuf>,
-    ) -> Result<()> {
+    fn bytes(&self) -> Result<Option<Vec<u8>>> {
+        self.bytes_b64
+            .as_ref()
+            .map(|encoded| {
+                STANDARD.decode(encoded).map_err(|source| {
+                    invalid_journal(source.to_string()).with_detail("path", self.path.clone())
+                })
+            })
+            .transpose()
+    }
+
+    pub fn fill_old_version(&mut self, root: &Path) -> Result<()> {
+        if self.old_version.is_none() && !self.tree {
+            self.old_version = read_version(&self.target(root)?)?;
+        }
+        Ok(())
+    }
+
+    fn is_inside(&self, tree: &str) -> bool {
+        self.path
+            .strip_prefix(tree)
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    fn apply(&self, root: &Path, durability: Durability, replay: Replay) -> Result<()> {
         let target = self.target(root)?;
         if self.tree {
-            return remove_tree_at(&target, durability);
-        }
-        match &self.bytes_b64 {
-            Some(encoded) => {
-                let bytes = STANDARD.decode(encoded).map_err(|source| {
-                    invalid_journal(source.to_string()).with_detail("path", self.path.clone())
-                })?;
-                place(&target, &bytes, durability)?;
+            if replay == Replay::KeepingLaterEdits {
+                return Ok(());
             }
+            return remove_tree(&target);
+        }
+        let bytes = self.bytes()?;
+        if replay != Replay::Always {
+            let current = read_version(&target)?;
+            let wanted = bytes.as_deref().map(version_of);
+            if current == wanted || current != self.old_version {
+                return Ok(());
+            }
+        }
+        match bytes {
+            Some(bytes) => place_ordered(&target, &bytes, durability)?,
             None => {
                 unlink(&target)?;
             }
         }
-        dirty.insert(parent_of(&target)?.to_path_buf());
         Ok(())
     }
 }
 
-fn apply_all(
-    root: &Path,
-    journal: &Journal,
-    durability: Durability,
-    after_each: impl Fn(usize),
-) -> Result<()> {
-    let mut dirty = BTreeSet::new();
-    for (index, entry) in journal.entries.iter().enumerate() {
-        entry.apply(root, durability, &mut dirty)?;
-        after_each(index + 1);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replay {
+    Always,
+    Guarded,
+    KeepingLaterEdits,
+}
+
+fn read_version(path: &Path) -> Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(version_of(&bytes))),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(source.into()),
     }
-    for dir in dirty {
-        sync_dir(&dir, durability)?;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +160,8 @@ pub(crate) struct Journal {
     pub commit_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_tx: Option<PendingTx>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<String>,
 }
 
 fn invalid_journal(message: impl Into<String>) -> Error {
@@ -145,12 +172,82 @@ fn journal_path(root: &Path) -> PathBuf {
     root.join(STATE_DIR).join(JOURNAL_FILE)
 }
 
-fn finish(root: &Path, state: &mut WriterState, journal: &Journal) -> Result<()> {
-    if let Some(result) = &journal.result {
-        state.tx_log.record(root, result, state.durability)?;
+fn encode_line(journal: &Journal) -> Vec<u8> {
+    let json = serde_json::to_vec(journal).expect("a journal serialises");
+    let mut line = version_of(&json).into_bytes();
+    line.push(b' ');
+    line.extend_from_slice(&json);
+    line.push(b'\n');
+    line
+}
+
+fn decode_line(line: &[u8]) -> Option<Journal> {
+    let space = line.iter().position(|byte| *byte == b' ')?;
+    let (sum, json) = (&line[..space], &line[space + 1..]);
+    if version_of(json).as_bytes() != sum {
+        return None;
     }
+    serde_json::from_slice(json).ok()
+}
+
+struct Records {
+    journals: Vec<Journal>,
+    valid_len: u64,
+    file_len: u64,
+}
+
+fn read_records(root: &Path) -> Result<Records> {
+    let bytes = match fs::read(journal_path(root)) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(source) => return Err(source.into()),
+    };
+    let mut journals = Vec::new();
+    let mut offset = 0;
+    while let Some(end) = bytes[offset..].iter().position(|byte| *byte == b'\n') {
+        let Some(journal) = decode_line(&bytes[offset..offset + end]) else {
+            break;
+        };
+        journals.push(journal);
+        offset += end + 1;
+    }
+    let as_len = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    Ok(Records {
+        journals,
+        valid_len: as_len(offset),
+        file_len: as_len(bytes.len()),
+    })
+}
+
+fn truncate(root: &Path, len: u64, durability: Durability) -> Result<()> {
+    let file = OpenOptions::new().write(true).open(journal_path(root))?;
+    file.set_len(len)?;
+    flush(&file, durability)
+}
+
+fn read_settled(root: &Path) -> Result<Vec<Journal>> {
+    let records = read_records(root)?;
+    if records.valid_len < records.file_len {
+        truncate(root, records.valid_len, Durability::Off)?;
+    }
+    Ok(records.journals)
+}
+
+fn append(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
+    let path = journal_path(root);
+    let created = !path.exists();
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    file.write_all(&encode_line(journal))?;
+    flush(&file, durability)?;
+    if created {
+        sync_dir(parent_of(&path)?, durability)?;
+    }
+    Ok(())
+}
+
+fn finish(root: &Path, journal: &Journal) -> Result<()> {
     if let Some(pending) = &journal.pending_tx {
-        crate::git::append_pending(root, pending, state.durability)?;
+        crate::git::append_pending(root, pending, Durability::Off)?;
     }
     if read_generation(root)? < journal.generation {
         replace_unsynced(
@@ -158,46 +255,205 @@ fn finish(root: &Path, state: &mut WriterState, journal: &Journal) -> Result<()>
             format!("{}\n", journal.generation).as_bytes(),
         )?;
     }
-    unlink(&journal_path(root))?;
+    Ok(())
+}
+
+fn roll_forward(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
+    for entry in &journal.entries {
+        entry.apply(root, durability, Replay::Always)?;
+    }
+    if journal.commit_pending {
+        commit_journal(root, journal)?;
+    }
+    finish(root, journal)
+}
+
+fn replay_settled(
+    root: &Path,
+    journal: &Journal,
+    later: &[Journal],
+    durability: Durability,
+) -> Result<()> {
+    for entry in &journal.entries {
+        let recreated = entry.tree
+            && later
+                .iter()
+                .flat_map(|journal| &journal.entries)
+                .any(|later_entry| later_entry.is_inside(&entry.path));
+        let replay = if recreated {
+            Replay::KeepingLaterEdits
+        } else {
+            Replay::Guarded
+        };
+        entry.apply(root, durability, replay)?;
+    }
+    Ok(())
+}
+
+fn remove_stray_temp_files(root: &Path, journals: &[Journal]) -> Result<()> {
+    let mut dirs = BTreeSet::new();
+    dirs.insert(root.join(STATE_DIR));
+    for entry in journals.iter().flat_map(|journal| &journal.entries) {
+        if let Some(parent) = entry.target(root)?.parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in dirs {
+        remove_temp_files(&dir)?;
+    }
+    Ok(())
+}
+
+fn remember(root: &Path, state: &mut WriterState, journals: &[Journal]) -> Result<()> {
+    state.journaled = journals
+        .iter()
+        .filter_map(|journal| journal.result.clone())
+        .collect();
+    state.journal_seen = Some(file_stamp(&journal_path(root))?);
     Ok(())
 }
 
 pub(crate) fn commit(root: &Path, state: &mut WriterState, journal: &Journal) -> Result<()> {
+    let durability = state.durability;
+    let path = journal_path(root);
+    let in_step = state.journal_seen == Some(file_stamp(&path)?);
     hooks::before_journal();
-    let bytes = serde_json::to_vec(journal).expect("a journal serialises");
-    write_atomic_at(&journal_path(root), &bytes, state.durability)?;
+    state.journal_seen = None;
+    append(root, journal, durability)?;
     hooks::after_journal();
     hooks::after_files(0);
-    apply_all(root, journal, state.durability, hooks::after_files)?;
+    for (index, entry) in journal.entries.iter().enumerate() {
+        entry.apply(root, durability, Replay::Always)?;
+        hooks::after_files(index + 1);
+    }
     if journal.commit_pending {
         hooks::before_git_commit();
         commit_journal(root, journal)?;
     }
-    finish(root, state, journal)
+    finish(root, journal)?;
+    if in_step {
+        state.journal_seen = Some(file_stamp(&path)?);
+        if let Some(result) = &journal.result {
+            state.journaled.push(result.clone());
+        }
+    }
+    if journal
+        .generation
+        .is_multiple_of(state.checkpoint_interval.max(1))
+        && let Err(error) = checkpoint(root, state)
+    {
+        tracing::warn!(
+            "the checkpoint failed and will be retried: {}",
+            error.message
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
+    let path = journal_path(root);
+    if state.journal_seen == Some(file_stamp(&path)?) {
+        return Ok(false);
+    }
+    state.journal_seen = None;
+    let journals = read_settled(root)?;
+    let generation = read_generation(root)?;
+    let unfinished: Vec<&Journal> = journals
+        .iter()
+        .filter(|journal| journal.generation > generation)
+        .collect();
+    if !unfinished.is_empty() {
+        remove_stray_temp_files(root, &journals)?;
+    }
+    for journal in &unfinished {
+        roll_forward(root, journal, state.durability)?;
+    }
+    remember(root, state, &journals)?;
+    Ok(!unfinished.is_empty())
 }
 
 pub(crate) fn recover(root: &Path, state: &mut WriterState) -> Result<bool> {
-    let durability = state.durability;
-    let bytes = match fs::read(journal_path(root)) {
-        Ok(bytes) => bytes,
-        Err(source) if source.kind() == ErrorKind::NotFound => {
-            remove_temp_files(&root.join(STATE_DIR), durability)?;
-            return Ok(false);
-        }
-        Err(source) => return Err(source.into()),
-    };
-    let journal: Journal =
-        serde_json::from_slice(&bytes).map_err(|source| invalid_journal(source.to_string()))?;
-    remove_temp_files(&root.join(STATE_DIR), durability)?;
-    for entry in &journal.entries {
-        if let Some(parent) = entry.target(root)?.parent() {
-            remove_temp_files(parent, durability)?;
+    state.journal_seen = None;
+    let journals = read_settled(root)?;
+    remove_stray_temp_files(root, &journals)?;
+    if journals.is_empty() {
+        remember(root, state, &journals)?;
+        return Ok(false);
+    }
+    let generation = read_generation(root)?;
+    let boot = boot_id();
+    for (index, journal) in journals.iter().enumerate() {
+        if journal.generation > generation {
+            roll_forward(root, journal, state.durability)?;
+        } else if boot.is_none() || journal.boot != boot {
+            replay_settled(root, journal, &journals[index + 1..], state.durability)?;
         }
     }
-    apply_all(root, &journal, durability, |_| {})?;
-    if journal.commit_pending {
-        commit_journal(root, &journal)?;
-    }
-    finish(root, state, &journal)?;
+    remember(root, state, &journals)?;
+    checkpoint(root, state)?;
     Ok(true)
+}
+
+fn ancestors(root: &Path, target: &Path, dirs: &mut BTreeSet<PathBuf>) {
+    let mut current = target.parent();
+    while let Some(dir) = current {
+        if !dir.starts_with(root) {
+            break;
+        }
+        dirs.insert(dir.to_path_buf());
+        if dir == root {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+pub(crate) fn checkpoint(root: &Path, state: &mut WriterState) -> Result<()> {
+    let durability = state.durability;
+    let records = read_records(root)?;
+    if records.file_len == 0 {
+        return Ok(());
+    }
+    let generation = read_generation(root)?;
+    if records
+        .journals
+        .iter()
+        .any(|journal| journal.generation > generation)
+    {
+        return Ok(());
+    }
+    hooks::during_checkpoint(0);
+    let mut dirs = BTreeSet::new();
+    dirs.insert(root.join(STATE_DIR));
+    for entry in records.journals.iter().flat_map(|journal| &journal.entries) {
+        ancestors(root, &entry.target(root)?, &mut dirs);
+    }
+    let results: Vec<&TxResult> = records
+        .journals
+        .iter()
+        .filter_map(|journal| journal.result.as_ref())
+        .collect();
+    state.tx_log.record_all(root, &results, durability)?;
+    place(
+        &root.join(STATE_DIR).join(GENERATION_FILE),
+        format!("{generation}\n").as_bytes(),
+        durability,
+    )?;
+    hooks::during_checkpoint(1);
+    for dir in dirs {
+        match sync_dir(&dir, durability) {
+            Err(error) if !dir.exists() => tracing::debug!("{}", error.message),
+            other => other?,
+        }
+    }
+    hooks::during_checkpoint(2);
+    truncate(root, 0, durability)?;
+    hooks::during_checkpoint(3);
+    state.journaled.clear();
+    state.journal_seen = Some(file_stamp(&journal_path(root))?);
+    Ok(())
+}
+
+pub(crate) fn has_records(root: &Path) -> bool {
+    fs::metadata(journal_path(root)).is_ok_and(|metadata| metadata.len() > 0)
 }

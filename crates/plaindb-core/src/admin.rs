@@ -22,7 +22,10 @@ fn already_exists(kind: &str, name: &str) -> Error {
 }
 
 impl Store {
-    pub(crate) fn commit_admin(&self, subject: &str, entries: Vec<JournalEntry>) -> Result<()> {
+    pub(crate) fn commit_admin(&self, subject: &str, mut entries: Vec<JournalEntry>) -> Result<()> {
+        for entry in &mut entries {
+            entry.fill_old_version(&self.root)?;
+        }
         let generation = self.snapshot.load().generation + 1;
         let tx_id = new_id();
         let plan = git::plan_admin(&self.root, &read_config(&self.root)?, &tx_id, subject)?;

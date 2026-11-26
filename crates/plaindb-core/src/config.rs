@@ -5,6 +5,7 @@ use crate::error::{Error, ErrorCode, Result};
 
 pub const STORE_FORMAT: u32 = 1;
 pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_CHECKPOINT_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,6 +59,7 @@ pub struct StoreConfig {
     pub branch: String,
     pub lock_timeout_ms: u64,
     pub durability: Durability,
+    pub checkpoint_interval: u64,
     pub limits: Limits,
 }
 
@@ -72,6 +74,7 @@ impl Default for StoreConfig {
             branch: "main".to_owned(),
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             durability: Durability::Full,
+            checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
             limits: Limits::default(),
         }
     }

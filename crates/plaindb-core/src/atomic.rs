@@ -26,6 +26,10 @@ mod platform {
         fcntl_or_fsync(file, libc::F_FULLFSYNC)
     }
 
+    pub(super) fn barrier(file: &File) -> io::Result<()> {
+        fcntl_or_fsync(file, libc::F_BARRIERFSYNC)
+    }
+
     pub(super) fn fsync(file: &File) -> io::Result<()> {
         if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
             Ok(())
@@ -44,6 +48,10 @@ mod platform {
         file.sync_data()
     }
 
+    pub(super) fn barrier(file: &File) -> io::Result<()> {
+        file.sync_data()
+    }
+
     pub(super) fn fsync(file: &File) -> io::Result<()> {
         file.sync_all()
     }
@@ -57,6 +65,13 @@ pub(crate) fn flush(file: &File, durability: Durability) -> Result<()> {
             platform::full(file)?;
         }
         Durability::Normal => platform::fsync(file)?,
+    }
+    Ok(())
+}
+
+fn order(file: &File, durability: Durability) -> Result<()> {
+    if durability != Durability::Off {
+        platform::barrier(file)?;
     }
     Ok(())
 }
@@ -102,13 +117,18 @@ fn temp_path(path: &Path) -> Result<PathBuf> {
     Ok(dir.join(format!(".{name}{TEMP_MARKER}{}", ulid::Ulid::generate())))
 }
 
-fn replace_with(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
-    ensure_dir(parent_of(path)?, durability)?;
+fn replace_with(path: &Path, bytes: &[u8], durability: Durability, ordered: bool) -> Result<()> {
+    let dir_durability = if ordered { Durability::Off } else { durability };
+    ensure_dir(parent_of(path)?, dir_durability)?;
     let temp = temp_path(path)?;
     let written = (|| -> Result<()> {
         let mut file = File::create(&temp)?;
         file.write_all(bytes)?;
-        flush(&file, durability)?;
+        if ordered {
+            order(&file, durability)?;
+        } else {
+            flush(&file, durability)?;
+        }
         fs::rename(&temp, path)?;
         Ok(())
     })();
@@ -119,11 +139,15 @@ fn replace_with(path: &Path, bytes: &[u8], durability: Durability) -> Result<()>
 }
 
 pub(crate) fn replace_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
-    replace_with(path, bytes, Durability::Off)
+    replace_with(path, bytes, Durability::Off, false)
 }
 
 pub(crate) fn place(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
-    replace_with(path, bytes, durability)
+    replace_with(path, bytes, durability, false)
+}
+
+pub(crate) fn place_ordered(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
+    replace_with(path, bytes, durability, true)
 }
 
 pub(crate) fn unlink(path: &Path) -> Result<bool> {
@@ -144,25 +168,20 @@ pub(crate) fn write_atomic_at(path: &Path, bytes: &[u8], durability: Durability)
 }
 
 pub fn remove_durable(path: &Path) -> Result<()> {
-    remove_at(path, Durability::Full)
-}
-
-pub(crate) fn remove_at(path: &Path, durability: Durability) -> Result<()> {
     if unlink(path)? {
-        sync_dir(parent_of(path)?, durability)?;
+        sync_dir(parent_of(path)?, Durability::Full)?;
     }
     Ok(())
 }
 
-pub(crate) fn remove_tree_at(path: &Path, durability: Durability) -> Result<()> {
+pub(crate) fn remove_tree(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path) {
-        Ok(()) => sync_dir(parent_of(path)?, durability),
-        Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(source.into()),
+        Err(source) if source.kind() != ErrorKind::NotFound => Err(source.into()),
+        _ => Ok(()),
     }
 }
 
-pub(crate) fn remove_temp_files(dir: &Path, durability: Durability) -> Result<()> {
+pub(crate) fn remove_temp_files(dir: &Path) -> Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
@@ -174,7 +193,7 @@ pub(crate) fn remove_temp_files(dir: &Path, durability: Durability) -> Result<()
             continue;
         };
         if name.starts_with('.') && name.contains(TEMP_MARKER) && entry.file_type()?.is_file() {
-            remove_at(&entry.path(), durability)?;
+            unlink(&entry.path())?;
         }
     }
     Ok(())
