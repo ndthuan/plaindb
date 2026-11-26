@@ -11,4 +11,4 @@ soak:
 	cargo test --locked --all-features -- --ignored
 
 bench:
-	@echo no benchmarks yet
+	cargo run --release --locked --example git_size
