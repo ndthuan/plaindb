@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use serde_json::Value;
@@ -43,7 +43,7 @@ pub struct ImportOptions {
     pub actor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Origin {
     Line(u64),
     File(String),
@@ -58,7 +58,14 @@ pub struct Omitted {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub origin: Origin,
-    pub code: ErrorCode,
+    pub code: String,
+    pub message: String,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aborted {
+    pub code: String,
     pub message: String,
 }
 
@@ -67,10 +74,15 @@ pub struct ImportReport {
     pub imported: u64,
     pub omitted: Vec<Omitted>,
     pub failed: Vec<Failure>,
+    pub aborted: Option<Aborted>,
 }
+
+pub const DUPLICATE_IN_INPUT: &str = "duplicate_in_input";
+const DEFAULT_LINE_LIMIT: u64 = 64 * 1024 * 1024;
 
 struct Candidate {
     origin: Origin,
+    folded: String,
     op: Op,
 }
 
@@ -82,6 +94,7 @@ struct Importer<'a> {
     snapshot: CollectionSnapshot,
     validator: Option<jsonschema::Validator>,
     taken: HashSet<String>,
+    seen: HashSet<String>,
     pending: Vec<Candidate>,
     report: ImportReport,
 }
@@ -97,6 +110,101 @@ fn is_document_error(code: ErrorCode) -> bool {
             | ErrorCode::UniqueViolation
             | ErrorCode::LimitExceeded
     )
+}
+
+const TIMESTAMP_FIELDS: [&str; 2] = ["_created_at", "_updated_at"];
+
+fn check_timestamps(doc: &Doc) -> Result<()> {
+    for field in TIMESTAMP_FIELDS {
+        let Some(value) = doc.get(field) else {
+            continue;
+        };
+        let parses = value
+            .as_str()
+            .is_some_and(|text| text.parse::<jiff::Timestamp>().is_ok());
+        if !parses {
+            return Err(Error::invalid_document(
+                "bad_timestamp",
+                format!("{field} must be an RFC 3339 timestamp"),
+            )
+            .with_detail("field", field));
+        }
+    }
+    Ok(())
+}
+
+fn op_index(error: &Error, len: usize) -> Option<usize> {
+    error
+        .details
+        .get("op_index")
+        .and_then(Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+        .filter(|index| *index < len)
+}
+
+fn without_op_index(error: &Error) -> Error {
+    let mut error = error.clone();
+    if let Value::Object(details) = &mut error.details {
+        details.remove("op_index");
+    }
+    error
+}
+
+enum Line {
+    Read,
+    TooLong,
+}
+
+fn read_line(
+    reader: &mut impl BufRead,
+    limit: u64,
+    buffer: &mut Vec<u8>,
+) -> io::Result<Option<Line>> {
+    buffer.clear();
+    let read = reader
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .read_until(b'\n', buffer)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buffer.last() == Some(&b'\n') {
+        buffer.pop();
+        return Ok(Some(Line::Read));
+    }
+    if u64::try_from(buffer.len()).unwrap_or(u64::MAX) <= limit {
+        return Ok(Some(Line::Read));
+    }
+    buffer.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        if let Some(end) = available.iter().position(|byte| *byte == b'\n') {
+            reader.consume(end + 1);
+            break;
+        }
+        let skipped = available.len();
+        reader.consume(skipped);
+    }
+    Ok(Some(Line::TooLong))
+}
+
+fn decode_line(bytes: &[u8]) -> Result<Option<Doc>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(doc)) => Ok(Some(doc)),
+        Ok(_) => Err(Error::invalid_document(
+            "not_an_object",
+            "a line must hold one JSON object",
+        )),
+        Err(source) => Err(Error::invalid_document("bad_json", source.to_string())),
+    }
 }
 
 impl<'a> Importer<'a> {
@@ -122,6 +230,7 @@ impl<'a> Importer<'a> {
             snapshot,
             validator,
             taken,
+            seen: HashSet::new(),
             pending: Vec::new(),
             report: ImportReport::default(),
         })
@@ -130,8 +239,18 @@ impl<'a> Importer<'a> {
     fn fail(&mut self, origin: Origin, error: &Error) {
         self.report.failed.push(Failure {
             origin,
-            code: error.code,
+            code: error.code.as_str().to_owned(),
             message: error.message.clone(),
+            details: error.details.clone(),
+        });
+    }
+
+    fn fail_as_duplicate(&mut self, origin: Origin, id: &str) {
+        self.report.failed.push(Failure {
+            origin,
+            code: DUPLICATE_IN_INPUT.to_owned(),
+            message: "the id occurs earlier in this input".to_owned(),
+            details: serde_json::json!({ "id": id }),
         });
     }
 
@@ -146,25 +265,28 @@ impl<'a> Importer<'a> {
                 ));
             }
         };
-        match (explicit, inside) {
-            (Some(file), Some(given)) if file != given => Err(Error::invalid_document(
-                "id_mismatch",
-                format!("the _id differs from the file name {file}"),
-            )),
-            (Some(id), _) | (None, Some(id)) => Ok(id.to_owned()),
-            (None, None) => Ok(new_id()),
-        }
+        let id = match (explicit, inside) {
+            (Some(file), Some(given)) if file != given => {
+                return Err(Error::invalid_document(
+                    "id_mismatch",
+                    format!("the _id differs from the file name {file}"),
+                ));
+            }
+            (Some(id), _) | (None, Some(id)) => id.to_owned(),
+            (None, None) => new_id(),
+        };
+        validate_id(&id)?;
+        Ok(id)
     }
 
-    fn check(&self, id: &str, doc: &Doc) -> Result<()> {
-        validate_id(id)?;
-        let folded = id.to_ascii_lowercase();
+    fn check(&self, id: &str, folded: &str, doc: &Doc) -> Result<()> {
+        check_timestamps(doc)?;
         if !self.options.replace {
             let exists = self
                 .snapshot
                 .files
                 .contains_key(&self.snapshot.file_name(id));
-            if exists || self.taken.contains(&folded) {
+            if exists || self.taken.contains(folded) {
                 return Err(Error::new(
                     ErrorCode::AlreadyExists,
                     format!("document {id} already exists"),
@@ -196,16 +318,22 @@ impl<'a> Importer<'a> {
 
     fn offer(&mut self, origin: Origin, explicit: Option<&str>, mut doc: Doc) -> Result<()> {
         doc.remove(VERSION_FIELD);
-        let id = Self::resolve_id(explicit, &doc);
-        let checked = id.and_then(|id| self.check(&id, &doc).map(|()| id));
-        let id = match checked {
+        let id = match Self::resolve_id(explicit, &doc) {
             Ok(id) => id,
             Err(error) => {
                 self.fail(origin, &error);
                 return Ok(());
             }
         };
-        self.taken.insert(id.to_ascii_lowercase());
+        let folded = id.to_ascii_lowercase();
+        if !self.seen.insert(folded.clone()) {
+            self.fail_as_duplicate(origin, &id);
+            return Ok(());
+        }
+        if let Err(error) = self.check(&id, &folded, &doc) {
+            self.fail(origin, &error);
+            return Ok(());
+        }
         let (db, coll) = (self.db.to_owned(), self.coll.to_owned());
         let op = if self.options.replace {
             Op::Put {
@@ -223,109 +351,90 @@ impl<'a> Importer<'a> {
                 doc,
             }
         };
-        self.pending.push(Candidate { origin, op });
+        self.pending.push(Candidate { origin, folded, op });
         if self.pending.len() >= IMPORT_BATCH {
             self.flush()?;
         }
         Ok(())
     }
 
-    fn write(&mut self, batch: Vec<Candidate>) -> Result<()> {
-        let ops = batch.iter().map(|entry| entry.op.clone()).collect();
-        let tx = Tx {
-            id: None,
-            actor: self.options.actor.clone(),
-            ops,
-            keep_timestamps: true,
-        };
-        match self.store.apply(tx) {
-            Ok(_) => {
-                self.report.imported += u64::try_from(batch.len()).unwrap_or(u64::MAX);
-                Ok(())
+    fn write(&mut self, mut batch: Vec<Candidate>) -> Result<()> {
+        loop {
+            if batch.is_empty() {
+                return Ok(());
             }
-            Err(error) if is_document_error(error.code) => {
-                if batch.len() == 1 {
-                    let origin = batch.into_iter().next().map(|entry| entry.origin);
-                    if let Some(origin) = origin {
-                        self.fail(origin, &error);
-                    }
+            let tx = Tx {
+                id: None,
+                actor: self.options.actor.clone(),
+                ops: batch.iter().map(|entry| entry.op.clone()).collect(),
+                keep_timestamps: true,
+            };
+            let error = match self.store.apply(tx) {
+                Ok(_) => {
+                    self.report.imported += u64::try_from(batch.len()).unwrap_or(u64::MAX);
+                    self.taken
+                        .extend(batch.into_iter().map(|entry| entry.folded));
                     return Ok(());
                 }
-                let mut left = batch;
-                let right = left.split_off(left.len() / 2);
-                self.write(left)?;
-                self.write(right)
+                Err(error) => error,
+            };
+            if !is_document_error(error.code) {
+                return Err(error);
             }
-            Err(error) => Err(error),
+            if let Some(index) = op_index(&error, batch.len()) {
+                let refused = batch.remove(index);
+                self.fail(refused.origin, &without_op_index(&error));
+                continue;
+            }
+            if batch.len() == 1 {
+                let refused = batch.remove(0);
+                self.fail(refused.origin, &error);
+                return Ok(());
+            }
+            let right = batch.split_off(batch.len() / 2);
+            self.write(batch)?;
+            return self.write(right);
         }
     }
 
     fn flush(&mut self) -> Result<()> {
         let batch = std::mem::take(&mut self.pending);
-        if batch.is_empty() {
-            return Ok(());
-        }
         self.write(batch)
     }
 
-    fn finish(mut self) -> Result<ImportReport> {
-        self.flush()?;
-        Ok(self.report)
-    }
-}
-
-impl Store {
-    pub fn import_jsonl(
-        &self,
-        db: &str,
-        coll: &str,
-        reader: impl BufRead,
-        options: &ImportOptions,
-    ) -> Result<ImportReport> {
-        let mut importer = Importer::new(self, db, coll, options)?;
-        for (index, line) in reader.split(b'\n').enumerate() {
-            let number = u64::try_from(index + 1).unwrap_or(u64::MAX);
+    fn read_lines(&mut self, mut reader: impl BufRead, limit: u64) -> Result<()> {
+        let mut buffer = Vec::new();
+        let mut number: u64 = 0;
+        while let Some(line) = read_line(&mut reader, limit, &mut buffer)? {
+            number += 1;
             let origin = Origin::Line(number);
-            let bytes = line?;
-            let line = if index == 0 {
-                without_bom(&bytes)
+            if matches!(line, Line::TooLong) {
+                let error = Error::new(
+                    ErrorCode::LimitExceeded,
+                    format!("the line is longer than {limit} bytes"),
+                )
+                .with_detail("limit", "max_document_bytes")
+                .with_detail("max", limit);
+                self.fail(origin, &error);
+                continue;
+            }
+            let bytes = if number == 1 {
+                without_bom(&buffer)
             } else {
-                &bytes
+                &buffer
             };
-            let decoded = std::str::from_utf8(line)
-                .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))
-                .and_then(|text| {
-                    if text.trim().is_empty() {
-                        return Ok(None);
-                    }
-                    match serde_json::from_str::<Value>(text) {
-                        Ok(Value::Object(doc)) => Ok(Some(doc)),
-                        Ok(_) => Err(Error::invalid_document(
-                            "not_an_object",
-                            "a line must hold one JSON object",
-                        )),
-                        Err(source) => Err(Error::invalid_document("bad_json", source.to_string())),
-                    }
-                });
-            match decoded {
-                Ok(Some(doc)) => importer.offer(origin, None, doc)?,
+            match decode_line(bytes) {
+                Ok(Some(doc)) => self.offer(origin, None, doc)?,
                 Ok(None) => {}
-                Err(error) => importer.fail(origin, &error),
+                Err(error) => self.fail(origin, &error),
             }
         }
-        importer.finish()
+        Ok(())
     }
 
-    pub fn import_dir(
-        &self,
-        db: &str,
-        coll: &str,
-        dir: &Path,
-        options: &ImportOptions,
-    ) -> Result<ImportReport> {
-        let mut importer = Importer::new(self, db, coll, options)?;
+    fn read_files(&mut self, entries: fs::ReadDir) -> Result<()> {
         let mut paths = Vec::new();
-        for entry in fs::read_dir(dir)? {
+        for entry in entries {
             let path = entry?.path();
             if path.is_file() && format_of_path(&path).is_some() {
                 paths.push(path);
@@ -339,7 +448,7 @@ impl Store {
                 .unwrap_or_default();
             let stem = path.file_stem().and_then(|stem| stem.to_str());
             let Some(stem) = stem.filter(|stem| validate_id(stem).is_ok()) else {
-                importer.report.omitted.push(Omitted {
+                self.report.omitted.push(Omitted {
                     file: name,
                     reason: ErrorCode::InvalidName.as_str().to_owned(),
                 });
@@ -349,11 +458,56 @@ impl Store {
                 .map_err(Error::from)
                 .and_then(|bytes| decode_file_bytes(&path, &bytes));
             match decoded {
-                Ok(doc) => importer.offer(Origin::File(name), Some(stem), doc)?,
-                Err(error) => importer.fail(Origin::File(name), &error),
+                Ok(doc) => self.offer(Origin::File(name), Some(stem), doc)?,
+                Err(error) => self.fail(Origin::File(name), &error),
             }
         }
-        importer.finish()
+        Ok(())
+    }
+
+    fn conclude(mut self, outcome: Result<()>) -> ImportReport {
+        if let Err(error) = outcome.and_then(|()| self.flush()) {
+            self.report.aborted = Some(Aborted {
+                code: error.code.as_str().to_owned(),
+                message: error.message,
+            });
+        }
+        self.report
+            .failed
+            .sort_by(|left, right| left.origin.cmp(&right.origin));
+        self.report
+    }
+}
+
+impl Store {
+    pub fn import_jsonl(
+        &self,
+        db: &str,
+        coll: &str,
+        reader: impl BufRead,
+        options: &ImportOptions,
+    ) -> Result<ImportReport> {
+        let mut importer = Importer::new(self, db, coll, options)?;
+        let limit = self
+            .config()
+            .limits
+            .max_document_bytes
+            .unwrap_or(DEFAULT_LINE_LIMIT);
+        let outcome = importer.read_lines(reader, limit);
+        Ok(importer.conclude(outcome))
+    }
+
+    pub fn import_dir(
+        &self,
+        db: &str,
+        coll: &str,
+        dir: &Path,
+        options: &ImportOptions,
+    ) -> Result<ImportReport> {
+        let mut importer = Importer::new(self, db, coll, options)?;
+        let entries = fs::read_dir(dir)?;
+        let outcome = importer.read_files(entries);
+        Ok(importer.conclude(outcome))
     }
 
     pub fn export_jsonl(&self, db: &str, coll: &str, mut out: impl Write) -> Result<u64> {

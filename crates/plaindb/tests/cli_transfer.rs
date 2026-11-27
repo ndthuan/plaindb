@@ -145,11 +145,7 @@ fn a_directory_import_reports_what_it_took_left_out_and_ignored() {
     );
     assert_eq!(report["failed"], json!([]));
     assert_eq!(ids(dir.path(), "notes"), ["a", "b"]);
-    let again = succeed(
-        dir.path(),
-        "import",
-        &["import", "app", "notes", "--dir", path],
-    );
+    let again = import_failed(dir.path(), &["import", "app", "notes", "--dir", path], None);
     assert_eq!(again["imported"], 0);
     assert_eq!(again["failed"].as_array().map(Vec::len), Some(2));
     assert_eq!(again["failed"][0]["code"], "already_exists");
@@ -382,4 +378,173 @@ fn an_export_goes_back_in_through_the_command_line() {
     assert_eq!(copied["doc"]["body"], body);
     let original = succeed(dir.path(), "get", &["get", "app", "notes", "page"]);
     assert_eq!(copied["doc"], original["doc"]);
+}
+
+fn import_failed(store: &Path, args: &[&str], stdin: Option<&str>) -> Value {
+    let run = exec(store, None, args, stdin);
+    assert_eq!(run.code, 1, "{args:?} should fail: {}", run.json);
+    assert_eq!(run.json["error"]["code"], "import_failed", "{}", run.json);
+    let report = run.json["error"]["details"]["report"].clone();
+    assert_valid(&validator("results/import.schema.json"), &report);
+    report
+}
+
+fn import_stdin(store: &Path, lines: &str) -> Run {
+    exec(
+        store,
+        Some("import"),
+        &["import", "app", "notes", "--jsonl", "-"],
+        Some(lines),
+    )
+}
+
+#[test]
+fn an_import_where_every_line_fails_exits_one_with_the_report() {
+    let dir = store_with_collection("json");
+    let run = exec(
+        dir.path(),
+        None,
+        &["import", "app", "notes", "--jsonl", "-"],
+        Some("not json\n[1]\n"),
+    );
+    assert_eq!(run.code, 1);
+    assert_eq!(
+        run.json["error"]["message"],
+        "no document was imported, 2 failed"
+    );
+    let report = import_failed(
+        dir.path(),
+        &["import", "app", "notes", "--jsonl", "-"],
+        Some("not json\n[1]\n"),
+    );
+    assert_eq!(report["imported"], 0);
+    assert_eq!(report["failed"][0]["line"], 1);
+    assert_eq!(report["failed"][1]["details"]["reason"], "not_an_object");
+    assert!(report.get("aborted").is_none());
+}
+
+#[test]
+fn an_empty_input_and_a_directory_of_other_files_import_nothing_and_succeed() {
+    let dir = store_with_collection("json");
+    let empty = import_stdin(dir.path(), "");
+    assert_eq!(empty.code, 0);
+    assert_eq!(empty.json["result"]["imported"], 0);
+    let source = tempfile::tempdir().expect("a temp dir");
+    fs::write(source.path().join("notes.txt"), "text").expect("a file");
+    fs::write(source.path().join("data.csv"), "a,b").expect("a file");
+    let report = succeed(
+        dir.path(),
+        "import",
+        &[
+            "import",
+            "app",
+            "notes",
+            "--dir",
+            source.path().to_str().expect("a path"),
+        ],
+    );
+    assert_eq!(report["imported"], 0);
+    assert_eq!(report["failed"], json!([]));
+}
+
+#[test]
+fn a_repeated_id_and_its_details_are_in_the_report() {
+    let dir = store_with_collection("json");
+    let run = import_stdin(
+        dir.path(),
+        "{\"_id\":\"dup1\",\"n\":1}\n{\"_id\":\"dup1\",\"n\":2}\n",
+    );
+    assert_eq!(run.code, 0);
+    let report = &run.json["result"];
+    assert_eq!(report["imported"], 1);
+    assert_eq!(report["failed"][0]["line"], 2);
+    assert_eq!(report["failed"][0]["code"], "duplicate_in_input");
+    assert_eq!(report["failed"][0]["details"]["id"], "dup1");
+}
+
+fn lock_during_second_batch(store: &Path, json: bool) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_plaindb"));
+    command.arg("--store").arg(store);
+    if json {
+        command.arg("--json");
+    }
+    let mut child = command
+        .args(["import", "app", "notes", "--jsonl", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    let mut input = child.stdin.take().expect("stdin is piped");
+    let batch = |from: u32| -> String {
+        (from..from + 500)
+            .map(|n| format!("{}\n", json!({ "_id": format!("d{n:04}") })))
+            .collect()
+    };
+    let generation = store.join(".plaindb").join("generation");
+    let before = fs::read_to_string(&generation).unwrap_or_default();
+    input
+        .write_all(batch(0).as_bytes())
+        .expect("stdin is written");
+    input.flush().expect("stdin is flushed");
+    let started = std::time::Instant::now();
+    while fs::read_to_string(&generation).unwrap_or_default() == before {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        std::thread::yield_now();
+    }
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(store.join(".plaindb").join("lock"))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+    input
+        .write_all(batch(500).as_bytes())
+        .expect("stdin is written");
+    drop(input);
+    let output = child.wait_with_output().expect("the binary finishes");
+    lock.unlock().expect("the lock is released");
+    output
+}
+
+#[test]
+fn an_import_stopped_by_the_lock_prints_its_report_and_exits_one() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "config",
+        &["config", "set", "lock_timeout_ms", "100"],
+    );
+    let output = lock_during_second_batch(dir.path(), true);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("text");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let parsed: Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_valid(&validator("response.schema.json"), &parsed);
+    assert_eq!(parsed["error"]["code"], "import_failed");
+    let message = parsed["error"]["message"].as_str().expect("a message");
+    assert!(message.starts_with("the import stopped: "), "{message}");
+    let report = &parsed["error"]["details"]["report"];
+    assert_valid(&validator("results/import.schema.json"), report);
+    assert_eq!(report["imported"], 500);
+    assert_eq!(report["aborted"]["code"], "store_locked_timeout");
+    assert_eq!(
+        succeed(dir.path(), "count", &["count", "app", "notes"])["count"],
+        500
+    );
+
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "config",
+        &["config", "set", "lock_timeout_ms", "100"],
+    );
+    let output = lock_during_second_batch(dir.path(), false);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("text");
+    assert!(stdout.starts_with("imported 500, "), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).expect("text");
+    assert!(
+        stderr.contains("error[import_failed]: the import stopped: "),
+        "{stderr}"
+    );
 }

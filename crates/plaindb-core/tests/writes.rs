@@ -842,3 +842,17 @@ fn a_markdown_write_with_a_declared_body_stays_valid() {
     assert!(store.get("main", "notes", "n1").unwrap().is_some());
     assert!(store.status().unwrap().invalid.is_empty());
 }
+
+#[test]
+fn a_file_changed_on_disk_names_the_operation_that_writes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_users(temp.path());
+    one(&store, insert("users", "ann", json!({"n": 1}))).unwrap();
+    fs::write(users(temp.path()).join("ann.json"), "{\"n\": 99}\n").unwrap();
+    let error = expect_err(store.apply(Tx::new(vec![
+        insert("users", "zed", json!({})),
+        put("users", "ann", json!({"n": 2}), None),
+    ])));
+    assert_eq!(error.details["reason"], json!("changed_on_disk"));
+    assert_eq!(error.details["op_index"], 1);
+}

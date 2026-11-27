@@ -132,6 +132,7 @@ struct Target {
     id: String,
     base: Option<String>,
     next: Option<Pending>,
+    op_index: usize,
 }
 
 impl Target {
@@ -151,6 +152,7 @@ struct Planner<'a> {
     validators: HashMap<(String, String), Option<Arc<jsonschema::Validator>>>,
     folded: HashMap<(String, String), HashMap<String, BTreeSet<String>>>,
     root: &'a std::path::Path,
+    op_index: usize,
 }
 
 fn refused(id: &str, reason: &str) -> Error {
@@ -385,9 +387,13 @@ impl<'a> Planner<'a> {
             _ => None,
         };
         let present = next.is_some();
+        let op_index = self.op_index;
         self.targets
             .entry(key)
-            .and_modify(|target| target.next = next.clone())
+            .and_modify(|target| {
+                target.next = next.clone();
+                target.op_index = op_index;
+            })
             .or_insert_with(|| Target {
                 db: db.to_owned(),
                 collection: collection.to_owned(),
@@ -395,6 +401,7 @@ impl<'a> Planner<'a> {
                 id: id.to_owned(),
                 base,
                 next,
+                op_index,
             });
         let folded = self.folded_ids(db, collection)?;
         let ids = folded.entry(id.to_ascii_lowercase()).or_default();
@@ -530,13 +537,15 @@ impl<'a> Planner<'a> {
 }
 
 fn check_indexes(snapshot: &Snapshot, targets: &[Target]) -> Result<()> {
+    let mut ordered: Vec<&Target> = targets.iter().collect();
+    ordered.sort_by_key(|target| target.op_index);
     let mut groups: BTreeMap<(&str, &str), Vec<PendingWrite<'_>>> = BTreeMap::new();
-    for target in targets {
+    for target in ordered {
         let doc = target.next.as_ref().map(|pending| &*pending.doc);
         groups
             .entry((&target.db, &target.collection))
             .or_default()
-            .push((&target.id, doc));
+            .push((&target.id, doc, target.op_index));
     }
     for ((db, collection), writes) in groups {
         let found = snapshot
@@ -629,9 +638,11 @@ impl Store {
             validators: HashMap::new(),
             folded: HashMap::new(),
             root: &self.root,
+            op_index: 0,
         };
         let mut results = Vec::with_capacity(tx.ops.len());
         for (index, op) in tx.ops.iter().enumerate() {
+            planner.op_index = index;
             let result = planner
                 .plan(op)
                 .map_err(|error| error.with_detail("op_index", index))?;
@@ -709,7 +720,8 @@ impl Store {
         )
         .with_detail("id", first.id.as_str())
         .with_detail("ids", ids)
-        .with_detail("reason", "changed_on_disk"))
+        .with_detail("reason", "changed_on_disk")
+        .with_detail("op_index", first.op_index))
     }
 
     fn publish(&self, snapshot: &Snapshot, generation: u64, targets: &[Target]) {

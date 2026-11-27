@@ -711,3 +711,35 @@ fn an_explicit_null_is_a_value_under_a_unique_index_and_a_missing_field_is_not()
         [json!({"field": "email", "value": null, "ids": ["z1", "z2"]})]
     );
 }
+
+#[test]
+fn a_unique_violation_names_the_operation_that_brings_the_second_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), &["users"]);
+    store
+        .set_indexes("main", "users", vec![unique("email")])
+        .unwrap();
+    let error = store
+        .apply(Tx::new(vec![
+            insert("users", "z9", json!({ "email": "a@x.io" })),
+            insert("users", "m5", json!({ "email": "b@x.io" })),
+            insert("users", "a1", json!({ "email": "a@x.io" })),
+        ]))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UniqueViolation);
+    assert_eq!(error.details["op_index"], 2);
+    store
+        .apply(Tx::new(vec![insert(
+            "users",
+            "held",
+            json!({ "email": "c@x.io" }),
+        )]))
+        .unwrap();
+    let error = store
+        .apply(Tx::new(vec![
+            insert("users", "b2", json!({ "email": "d@x.io" })),
+            insert("users", "a2", json!({ "email": "c@x.io" })),
+        ]))
+        .unwrap_err();
+    assert_eq!(error.details["op_index"], 1);
+}

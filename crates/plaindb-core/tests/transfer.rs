@@ -1,8 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, BufRead, Read};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use plaindb_core::transfer::{ImportOptions, ImportReport, Origin};
-use plaindb_core::{ErrorCode, Format, IndexSpec, Store};
+use plaindb_core::{Format, IndexSpec, Store};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -108,7 +110,7 @@ fn a_file_whose_id_differs_from_its_name_fails() {
         report
             .failed
             .iter()
-            .all(|failure| failure.code == ErrorCode::InvalidDocument)
+            .all(|failure| failure.code == "invalid_document")
     );
     assert!(matches!(&report.failed[0].origin, Origin::File(name) if name == "broken.json"));
 }
@@ -133,7 +135,8 @@ fn one_failing_document_among_ten_leaves_nine() {
     assert_eq!(report.imported, 9);
     assert_eq!(report.failed.len(), 1);
     assert_eq!(report.failed[0].origin, Origin::Line(7));
-    assert_eq!(report.failed[0].code, ErrorCode::SchemaViolation);
+    assert_eq!(report.failed[0].code, "schema_violation");
+    assert!(report.failed[0].details["errors"].is_array());
     assert!(store.get("app", "docs", "d6").expect("read").is_none());
     assert_eq!(store.list_ids("app", "docs").expect("ids").len(), 9);
 }
@@ -144,17 +147,17 @@ fn bad_lines_are_counted_with_their_numbers_and_blank_lines_are_ignored() {
     let lines = "{\"_id\":\"a\"}\n\n{broken\n[1,2]\n   \n{\"_id\":\"-bad\"}\n{\"n\":5}\n";
     let report = import_lines(&store, lines, false);
     assert_eq!(report.imported, 2);
-    let failed: Vec<(Origin, ErrorCode)> = report
+    let failed: Vec<(Origin, &str)> = report
         .failed
         .iter()
-        .map(|failure| (failure.origin.clone(), failure.code))
+        .map(|failure| (failure.origin.clone(), failure.code.as_str()))
         .collect();
     assert_eq!(
         failed,
         [
-            (Origin::Line(3), ErrorCode::InvalidDocument),
-            (Origin::Line(4), ErrorCode::InvalidDocument),
-            (Origin::Line(6), ErrorCode::InvalidName),
+            (Origin::Line(3), "invalid_document"),
+            (Origin::Line(4), "invalid_document"),
+            (Origin::Line(6), "invalid_name"),
         ]
     );
 }
@@ -169,12 +172,17 @@ fn an_existing_id_fails_unless_replace_is_given() {
         false,
     );
     assert_eq!(again.imported, 1);
-    assert_eq!(again.failed.len(), 2);
-    assert!(
-        again
-            .failed
-            .iter()
-            .all(|failure| failure.code == ErrorCode::AlreadyExists)
+    let failed: Vec<(Origin, &str)> = again
+        .failed
+        .iter()
+        .map(|failure| (failure.origin.clone(), failure.code.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        [
+            (Origin::Line(1), "already_exists"),
+            (Origin::Line(3), "duplicate_in_input"),
+        ]
     );
     let (kept, _) = store
         .get("app", "docs", "a")
@@ -253,7 +261,7 @@ fn a_document_the_write_refuses_is_reported_alone() {
     let report = import_lines(&store, &lines, false);
     assert_eq!(report.imported, 7);
     assert_eq!(report.failed.len(), 1);
-    assert_eq!(report.failed[0].code, ErrorCode::UniqueViolation);
+    assert_eq!(report.failed[0].code, "unique_violation");
     assert_eq!(report.failed[0].origin, Origin::Line(6));
 }
 
@@ -352,4 +360,365 @@ fn a_jsonl_import_drops_a_leading_byte_order_mark() {
     assert_eq!(report.imported, 2);
     let (doc, _) = store.get("app", "docs", "a").unwrap().unwrap();
     assert_eq!(doc["n"], 1);
+}
+
+fn commits(root: &Path) -> u64 {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .expect("git runs");
+    String::from_utf8(output.stdout)
+        .expect("text")
+        .trim()
+        .parse()
+        .expect("a count")
+}
+
+fn git_store() -> (TempDir, Store) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Store::init_with_git(dir.path()).expect("the store initialises");
+    store.create_db("app").expect("a db");
+    store
+        .create_collection("app", "docs", Format::Json)
+        .expect("a collection");
+    (dir, store)
+}
+
+fn codes(report: &ImportReport) -> Vec<(Origin, &str)> {
+    report
+        .failed
+        .iter()
+        .map(|failure| (failure.origin.clone(), failure.code.as_str()))
+        .collect()
+}
+
+#[test]
+fn a_repeated_id_in_one_input_fails_as_a_duplicate_with_or_without_replace() {
+    for replace in [false, true] {
+        let (_dir, store) = store_with(Format::Json);
+        let report = import_lines(
+            &store,
+            "{\"_id\":\"dup1\",\"n\":1}\n{\"_id\":\"dup1\",\"n\":2}\n{\"_id\":\"DUP1\",\"n\":3}\n",
+            replace,
+        );
+        assert_eq!(report.imported, 1, "replace {replace}");
+        assert_eq!(
+            codes(&report),
+            [
+                (Origin::Line(2), "duplicate_in_input"),
+                (Origin::Line(3), "duplicate_in_input"),
+            ],
+            "replace {replace}"
+        );
+        let (kept, _) = store.get("app", "docs", "dup1").unwrap().unwrap();
+        assert_eq!(kept["n"], 1, "replace {replace}");
+        assert_eq!(store.list_ids("app", "docs").unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn a_duplicate_directory_file_fails_as_a_duplicate() {
+    let (_dir, store) = store_with(Format::Json);
+    let source = tempfile::tempdir().expect("a temp dir");
+    fs::write(source.path().join("a.json"), r#"{"n":1}"#).expect("a file");
+    fs::write(source.path().join("a.yaml"), "n: 2\n").expect("a file");
+    let report = store
+        .import_dir("app", "docs", source.path(), &ImportOptions::default())
+        .expect("the import runs");
+    assert_eq!(report.imported, 1);
+    assert_eq!(
+        codes(&report),
+        [(Origin::File("a.yaml".to_owned()), "duplicate_in_input")]
+    );
+}
+
+#[test]
+fn an_id_of_a_failed_line_is_still_a_duplicate_later() {
+    let (_dir, store) = store_with(Format::Json);
+    store
+        .set_schema(
+            "app",
+            "docs",
+            Some(json!({ "type": "object", "properties": { "n": { "type": "integer" } } })),
+        )
+        .expect("a schema");
+    let lines: String = (1..=9)
+        .map(|line| match line {
+            3 => format!("{}\n", json!({ "_id": "x", "n": "three" })),
+            9 => format!("{}\n", json!({ "_id": "x", "n": 9 })),
+            other => format!("{}\n", json!({ "_id": format!("d{other}"), "n": other })),
+        })
+        .collect();
+    let report = import_lines(&store, &lines, false);
+    assert_eq!(report.imported, 7);
+    assert_eq!(
+        codes(&report),
+        [
+            (Origin::Line(3), "schema_violation"),
+            (Origin::Line(9), "duplicate_in_input"),
+        ]
+    );
+    assert!(store.get("app", "docs", "x").unwrap().is_none());
+}
+
+#[test]
+fn an_id_already_in_the_collection_still_fails_as_existing() {
+    let (_dir, store) = store_with(Format::Json);
+    import_lines(&store, "{\"_id\":\"a\",\"n\":1}\n", false);
+    let again = import_lines(&store, "{\"_id\":\"a\",\"n\":2}\n", false);
+    assert_eq!(codes(&again), [(Origin::Line(1), "already_exists")]);
+}
+
+fn numbered(count: u64, line: impl Fn(u64) -> Value) -> String {
+    (1..=count).map(|n| format!("{}\n", line(n))).collect()
+}
+
+#[test]
+fn a_batch_lands_in_one_commit_even_when_documents_fail_in_it() {
+    let (dir, store) = git_store();
+    let before = commits(dir.path());
+    let report = import_lines(
+        &store,
+        &numbered(1201, |n| json!({ "_id": format!("d{n:04}") })),
+        false,
+    );
+    assert_eq!(report.imported, 1201);
+    assert_eq!(commits(dir.path()) - before, 3);
+
+    let (dir, store) = git_store();
+    store
+        .set_schema(
+            "app",
+            "docs",
+            Some(json!({ "type": "object", "properties": { "n": { "type": "integer" } } })),
+        )
+        .expect("a schema");
+    let before = commits(dir.path());
+    let lines = numbered(1201, |n| {
+        let value = if n == 700 {
+            json!("seven hundred")
+        } else {
+            json!(n)
+        };
+        json!({ "_id": format!("d{n:04}"), "n": value })
+    });
+    let report = import_lines(&store, &lines, false);
+    assert_eq!(report.imported, 1200);
+    assert_eq!(codes(&report), [(Origin::Line(700), "schema_violation")]);
+    assert!(report.failed[0].details["errors"].is_array());
+    assert_eq!(commits(dir.path()) - before, 3);
+}
+
+fn unique_email(store: &Store) {
+    store
+        .set_indexes(
+            "app",
+            "docs",
+            vec![IndexSpec::Field {
+                field: "email".to_owned(),
+                unique: true,
+                multi: false,
+            }],
+        )
+        .expect("an index");
+}
+
+#[test]
+fn documents_the_write_refuses_leave_the_rest_of_their_batch_in_one_commit() {
+    let (dir, store) = git_store();
+    unique_email(&store);
+    store
+        .set_setting("limits.max_document_bytes", "400")
+        .expect("a limit");
+    let before = commits(dir.path());
+    let lines = numbered(1201, |n| match n {
+        700 => json!({ "_id": "d0700", "email": "user10@example.com" }),
+        900 => json!({ "_id": "d0900", "email": "big@example.com", "text": "x".repeat(600) }),
+        n => json!({ "_id": format!("d{n:04}"), "email": format!("user{n}@example.com") }),
+    });
+    let report = import_lines(&store, &lines, false);
+    assert_eq!(report.imported, 1199);
+    assert_eq!(
+        codes(&report),
+        [
+            (Origin::Line(700), "unique_violation"),
+            (Origin::Line(900), "limit_exceeded"),
+        ]
+    );
+    assert_eq!(report.failed[0].details["field"], "email");
+    assert_eq!(commits(dir.path()) - before, 3);
+    let (first, _) = store.get("app", "docs", "d0010").unwrap().unwrap();
+    assert_eq!(first["email"], "user10@example.com");
+    assert!(store.get("app", "docs", "d0700").unwrap().is_none());
+    assert!(report.aborted.is_none());
+}
+
+#[test]
+fn two_lines_with_one_unique_value_in_a_batch_keep_the_first() {
+    let (dir, store) = git_store();
+    unique_email(&store);
+    let before = commits(dir.path());
+    let report = import_lines(
+        &store,
+        "{\"_id\":\"z\",\"email\":\"same@example.com\"}\n{\"_id\":\"a\",\"email\":\"same@example.com\"}\n",
+        false,
+    );
+    assert_eq!(report.imported, 1);
+    assert_eq!(codes(&report), [(Origin::Line(2), "unique_violation")]);
+    assert!(store.get("app", "docs", "z").unwrap().is_some());
+    assert_eq!(commits(dir.path()) - before, 1);
+}
+
+type Hook = Box<dyn FnMut(u64) -> io::Result<()>>;
+
+struct Lines {
+    lines: std::collections::VecDeque<Vec<u8>>,
+    current: Vec<u8>,
+    position: usize,
+    number: u64,
+    hook: Hook,
+}
+
+impl Lines {
+    fn new(text: &str, hook: impl FnMut(u64) -> io::Result<()> + 'static) -> Self {
+        Self {
+            lines: text
+                .split_inclusive('\n')
+                .map(|line| line.as_bytes().to_vec())
+                .collect(),
+            current: Vec::new(),
+            position: 0,
+            number: 0,
+            hook: Box::new(hook),
+        }
+    }
+}
+
+impl Read for Lines {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let available = self.fill_buf()?;
+        let count = available.len().min(buf.len());
+        buf[..count].copy_from_slice(&available[..count]);
+        self.consume(count);
+        Ok(count)
+    }
+}
+
+impl BufRead for Lines {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.position == self.current.len() {
+            let Some(next) = self.lines.pop_front() else {
+                return Ok(&[]);
+            };
+            self.number += 1;
+            (self.hook)(self.number)?;
+            self.current = next;
+            self.position = 0;
+        }
+        Ok(&self.current[self.position..])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.position += amount;
+    }
+}
+
+fn import_from(store: &Store, reader: Lines) -> ImportReport {
+    store
+        .import_jsonl("app", "docs", reader, &ImportOptions::default())
+        .expect("the import returns a report")
+}
+
+#[test]
+fn a_lock_held_by_another_writer_stops_the_import_with_a_report() {
+    let (dir, store) = store_with(Format::Json);
+    store
+        .set_setting("lock_timeout_ms", "100")
+        .expect("a timeout");
+    let lock_path = dir.path().join(".plaindb").join("lock");
+    let mut held = Vec::new();
+    let reader = Lines::new(
+        &numbered(1200, |n| json!({ "_id": format!("d{n:04}") })),
+        move |line| {
+            if line == 501 {
+                let file = fs::OpenOptions::new().write(true).open(&lock_path)?;
+                file.lock()?;
+                held.push(file);
+            }
+            Ok(())
+        },
+    );
+    let report = import_from(&store, reader);
+    assert_eq!(report.imported, 500);
+    let aborted = report.aborted.as_ref().expect("the import stopped");
+    assert_eq!(aborted.code, "store_locked_timeout");
+    assert!(!aborted.message.is_empty());
+    assert!(report.failed.is_empty());
+    assert_eq!(store.list_ids("app", "docs").unwrap().len(), 500);
+}
+
+#[test]
+fn an_input_that_cannot_be_read_stops_the_import_with_a_report() {
+    let (_dir, store) = store_with(Format::Json);
+    let reader = Lines::new(
+        &numbered(700, |n| json!({ "_id": format!("d{n:04}") })),
+        |line| {
+            if line == 650 {
+                return Err(io::Error::other("the disk went away"));
+            }
+            Ok(())
+        },
+    );
+    let report = import_from(&store, reader);
+    assert_eq!(report.imported, 500);
+    let aborted = report.aborted.as_ref().expect("the import stopped");
+    assert_eq!(aborted.code, "io");
+    assert!(
+        aborted.message.contains("the disk went away"),
+        "{}",
+        aborted.message
+    );
+    assert_eq!(store.list_ids("app", "docs").unwrap().len(), 500);
+}
+
+#[test]
+fn a_timestamp_that_is_not_rfc_3339_text_fails_the_line() {
+    let (_dir, store) = store_with(Format::Json);
+    let report = import_lines(
+        &store,
+        "{\"_id\":\"a\",\"_created_at\":5}\n{\"_id\":\"b\",\"_updated_at\":\"yesterday\"}\n{\"_id\":\"c\",\"_created_at\":\"2020-01-02T03:04:05Z\"}\n",
+        false,
+    );
+    assert_eq!(report.imported, 1);
+    assert_eq!(
+        codes(&report),
+        [
+            (Origin::Line(1), "invalid_document"),
+            (Origin::Line(2), "invalid_document"),
+        ]
+    );
+    assert_eq!(report.failed[0].details["reason"], "bad_timestamp");
+    assert_eq!(report.failed[0].details["field"], "_created_at");
+    assert_eq!(report.failed[1].details["field"], "_updated_at");
+    let (kept, _) = store.get("app", "docs", "c").unwrap().unwrap();
+    assert_eq!(kept["_created_at"], "2020-01-02T03:04:05Z");
+}
+
+#[test]
+fn a_line_longer_than_the_document_limit_fails_and_the_next_one_imports() {
+    let (_dir, store) = store_with(Format::Json);
+    store
+        .set_setting("limits.max_document_bytes", "1000")
+        .expect("a limit");
+    let long = json!({ "_id": "long", "text": "x".repeat(2000) });
+    let lines = format!("{long}\n{}\n", json!({ "_id": "short" }));
+    let report = import_lines(&store, &lines, false);
+    assert_eq!(report.imported, 1);
+    assert_eq!(codes(&report), [(Origin::Line(1), "limit_exceeded")]);
+    assert_eq!(report.failed[0].details["limit"], "max_document_bytes");
+    assert_eq!(report.failed[0].details["max"], 1000);
+    assert!(store.get("app", "docs", "short").unwrap().is_some());
+    assert!(store.get("app", "docs", "long").unwrap().is_none());
 }

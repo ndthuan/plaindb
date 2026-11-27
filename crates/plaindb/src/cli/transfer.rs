@@ -48,7 +48,7 @@ pub struct ExportArgs {
     pub out: Option<PathBuf>,
 }
 
-fn report_output(report: &ImportReport) -> Output {
+fn report_json(report: &ImportReport) -> Value {
     let omitted: Vec<Value> = report
         .omitted
         .iter()
@@ -58,7 +58,11 @@ fn report_output(report: &ImportReport) -> Output {
         .failed
         .iter()
         .map(|entry| {
-            let mut value = json!({ "code": entry.code.as_str(), "message": entry.message });
+            let mut value = json!({
+                "code": entry.code,
+                "message": entry.message,
+                "details": entry.details,
+            });
             match &entry.origin {
                 Origin::Line(line) => value["line"] = json!(line),
                 Origin::File(file) => value["file"] = json!(file),
@@ -66,6 +70,22 @@ fn report_output(report: &ImportReport) -> Output {
             value
         })
         .collect();
+    let mut value = json!({ "imported": report.imported, "omitted": omitted, "failed": failed });
+    if let Some(aborted) = &report.aborted {
+        value["aborted"] = json!({ "code": aborted.code, "message": aborted.message });
+    }
+    value
+}
+
+fn failure_message(report: &ImportReport) -> Option<String> {
+    if let Some(aborted) = &report.aborted {
+        return Some(format!("the import stopped: {}", aborted.message));
+    }
+    (report.imported == 0 && !report.failed.is_empty())
+        .then(|| format!("no document was imported, {} failed", report.failed.len()))
+}
+
+fn report_output(report: &ImportReport) -> Output {
     let mut lines = vec![format!(
         "imported {}, omitted {}, failed {}",
         report.imported,
@@ -82,10 +102,16 @@ fn report_output(report: &ImportReport) -> Output {
         };
         lines.push(format!("failed {place}: {}", entry.code));
     }
-    Output::lines(
-        json!({ "imported": report.imported, "omitted": omitted, "failed": failed }),
-        lines,
-    )
+    let result = report_json(report);
+    let output = Output::lines(result.clone(), lines);
+    match failure_message(report) {
+        Some(message) => output.with_exit_code(1).with_failure(
+            "import_failed",
+            message,
+            json!({ "report": result }),
+        ),
+        None => output,
+    }
 }
 
 pub fn import(context: &Context, args: &ImportArgs) -> Result<Output> {

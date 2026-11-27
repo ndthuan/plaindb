@@ -15,7 +15,7 @@ use crate::query::{crosses_array, elements, terminals};
 use crate::snapshot::{CollectionSnapshot, FileEntry, Outcome};
 use crate::text::{TextFields, doc_tokens, tokens};
 
-pub type PendingWrite<'a> = (&'a str, Option<&'a Doc>);
+pub type PendingWrite<'a> = (&'a str, Option<&'a Doc>, usize);
 pub type Postings = Arc<RoaringBitmap>;
 type PostingMap<K> = RedBlackTreeMapSync<K, Postings>;
 
@@ -579,37 +579,50 @@ impl Indexes {
     }
 
     pub fn check_writes(&self, db: &str, coll: &str, writes: &[PendingWrite<'_>]) -> Result<()> {
-        let touched: BTreeSet<&str> = writes.iter().map(|(id, _)| *id).collect();
+        let touched: BTreeSet<&str> = writes.iter().map(|(id, _, _)| *id).collect();
         for index in &self.fields {
-            let mut incoming: BTreeMap<Key, Vec<String>> = BTreeMap::new();
-            for (id, doc) in writes {
+            let mut incoming: BTreeMap<Key, Vec<(String, usize)>> = BTreeMap::new();
+            for (id, doc, op_index) in writes {
                 let Some(doc) = doc else { continue };
                 match index.keys_for(doc) {
                     Keys::Refused => {
-                        return Err(array_refused(&index.field, vec![(*id).to_owned()]));
+                        return Err(array_refused(&index.field, vec![(*id).to_owned()])
+                            .with_detail("op_index", *op_index));
                     }
                     Keys::Some(keys) if index.unique => {
                         for key in keys {
-                            let ids = incoming.entry(Key(key)).or_default();
-                            if !ids.iter().any(|known| known == id) {
-                                ids.push((*id).to_owned());
+                            let holders = incoming.entry(Key(key)).or_default();
+                            if !holders.iter().any(|(known, _)| known == id) {
+                                holders.push(((*id).to_owned(), *op_index));
                             }
                         }
                     }
                     Keys::Some(_) => {}
                 }
             }
-            for (key, mut ids) in incoming {
-                if let Some(existing) = index.entries.get(&key) {
-                    ids.extend(
+            for (key, holders) in incoming {
+                let existing: Vec<String> = index
+                    .entries
+                    .get(&key)
+                    .map(|existing| {
                         self.ids(existing)
                             .into_iter()
-                            .filter(|id| !touched.contains(id.as_str())),
-                    );
-                }
-                if ids.len() > 1 {
-                    return Err(unique_violation(db, coll, &index.field, &key.0, ids));
-                }
+                            .filter(|id| !touched.contains(id.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let second = usize::from(existing.is_empty());
+                let Some((_, violating)) = holders.get(second) else {
+                    continue;
+                };
+                let violating = *violating;
+                let ids: Vec<String> = holders
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .chain(existing)
+                    .collect();
+                return Err(unique_violation(db, coll, &index.field, &key.0, ids)
+                    .with_detail("op_index", violating));
             }
         }
         Ok(())
