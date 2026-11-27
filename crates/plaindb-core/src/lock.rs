@@ -68,20 +68,55 @@ impl WriteLock {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                return Err(Error::new(
-                    ErrorCode::StoreLockedTimeout,
-                    "another process holds the store's write lock",
-                )
-                .with_detail(
-                    "timeout_ms",
-                    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                ));
+                return Err(locked_timeout(timeout));
             }
             thread::sleep(RETRY_DELAY.min(deadline - now));
             if !would_block(file.try_lock())? {
                 return Ok(Self { file });
             }
         }
+    }
+}
+
+fn locked_timeout(timeout: Duration) -> Error {
+    Error::new(
+        ErrorCode::StoreLockedTimeout,
+        "another process holds the store's write lock",
+    )
+    .with_detail(
+        "timeout_ms",
+        u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+    )
+}
+
+#[derive(Debug)]
+pub struct ReadLock {
+    file: File,
+}
+
+impl ReadLock {
+    pub fn acquire(store: impl AsRef<Path>, timeout: Duration) -> Result<Option<Self>> {
+        let path = store.as_ref().join(STATE_DIR).join(LOCK_FILE);
+        let Ok(file) = OpenOptions::new().read(true).open(path) else {
+            return Ok(None);
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !would_block(file.try_lock_shared())? {
+                return Ok(Some(Self { file }));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(locked_timeout(timeout));
+            }
+            thread::sleep(RETRY_DELAY.min(deadline - now));
+        }
+    }
+}
+
+impl Drop for ReadLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 

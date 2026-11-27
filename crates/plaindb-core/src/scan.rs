@@ -3,7 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
 use serde_json::Value;
@@ -12,15 +12,60 @@ use crate::codec::{Doc, codec_for};
 use crate::config::{CollectionMeta, STORE_FORMAT, from_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::index::Indexes;
+use crate::journal::{self, JOURNAL_FILE};
+use crate::lock::ReadLock;
 use crate::names::validate_id;
 use crate::snapshot::{
     CollectionSnapshot, DbSnapshot, DocEntry, FileEntry, Invalid, Outcome, Snapshot,
 };
 use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
+use crate::txlog::{FileStamp, file_stamp};
 use crate::version::version_of;
 
 pub(crate) const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"];
 pub const GENERATION_FILE: &str = "generation";
+
+const CHECKED_ATTEMPTS: usize = 5;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Mark {
+    generation: u64,
+    journal: Option<FileStamp>,
+    unfinished: bool,
+}
+
+fn mark(root: &Path) -> Result<Mark> {
+    Ok(Mark {
+        generation: read_generation(root)?,
+        journal: file_stamp(&root.join(STATE_DIR).join(JOURNAL_FILE))?,
+        unfinished: journal::unfinished_count(root)? > 0,
+    })
+}
+
+pub(crate) fn checked<T>(root: &Path, scan: impl Fn() -> Result<T>) -> Result<T> {
+    let mut previous = None;
+    for _ in 0..CHECKED_ATTEMPTS {
+        let before = mark(root)?;
+        let result = scan()?;
+        let after = mark(root)?;
+        if before == after && (!after.unfinished || previous.as_ref() == Some(&after)) {
+            return Ok(result);
+        }
+        previous = Some(after);
+    }
+    Err(Error::new(
+        ErrorCode::StoreLockedTimeout,
+        "the store kept changing while it was read",
+    )
+    .with_detail("reason", "store_moving"))
+}
+
+pub(crate) fn whole<T>(root: &Path, timeout: Duration, scan: impl Fn() -> Result<T>) -> Result<T> {
+    match ReadLock::acquire(root, timeout)? {
+        Some(_lock) => scan(),
+        None => checked(root, scan),
+    }
+}
 
 pub fn full_scan(root: &Path) -> Result<Snapshot> {
     rescan(root, &Snapshot::default())

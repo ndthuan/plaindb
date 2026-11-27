@@ -131,19 +131,24 @@ pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     Ok(config)
 }
 
-fn open_snapshot(root: &Path) -> Result<Snapshot> {
-    let (snapshot, unchanged) = match cache::load(root) {
+fn open_snapshot(root: &Path, timeout: Duration) -> Result<Snapshot> {
+    let cached = cache::load(root);
+    let (snapshot, unchanged) = scan::whole(root, timeout, || match &cached {
         Some(cached) => {
-            let current = scan::rescan(root, &cached)?;
-            let unchanged = cache::same_files(&cached, &current);
-            (current, unchanged)
+            let current = scan::rescan(root, cached)?;
+            let unchanged = cache::same_files(cached, &current);
+            Ok((current, unchanged))
         }
-        None => (scan::full_scan(root)?, false),
-    };
+        None => Ok((scan::full_scan(root)?, false)),
+    })?;
     if !unchanged && let Err(error) = cache::write(root, &snapshot) {
         tracing::debug!("the index cache could not be written: {}", error.message);
     }
     Ok(snapshot)
+}
+
+fn lock_timeout(config: &StoreConfig) -> Duration {
+    Duration::from_millis(config.lock_timeout_ms)
 }
 
 fn state_dir_is_writable(root: &Path) -> bool {
@@ -215,7 +220,9 @@ impl Store {
             &to_file_bytes(&initial),
             config.durability,
         )?;
-        let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
+        let snapshot = ArcSwap::from_pointee(scan::whole(&root, lock_timeout(&config), || {
+            scan::full_scan(&root)
+        })?);
         let writer = Mutex::new(WriterState::new(&config));
         let root_for_mark = root.clone();
         let store = Self {
@@ -243,7 +250,7 @@ impl Store {
             }
         }
         let last_seen_head = Mutex::new(git::head_mark(&root));
-        let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
+        let snapshot = ArcSwap::from_pointee(open_snapshot(&root, lock_timeout(&config))?);
         Ok(Self {
             root,
             config: ArcSwap::from_pointee(config),
@@ -273,7 +280,7 @@ impl Store {
             }
         }
         let last_seen_head = Mutex::new(git::head_mark(&root));
-        let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
+        let snapshot = ArcSwap::from_pointee(open_snapshot(&root, lock_timeout(&config))?);
         Ok(Self {
             root,
             config: ArcSwap::from_pointee(config),
@@ -305,7 +312,7 @@ impl Store {
     }
 
     pub(crate) fn lock_timeout(&self) -> Duration {
-        Duration::from_millis(self.config.load().lock_timeout_ms)
+        lock_timeout(&self.config.load())
     }
 
     pub fn root(&self) -> &Path {
@@ -379,7 +386,9 @@ impl Store {
     pub fn rescan(&self) -> Result<()> {
         let head = self.read_head_mark();
         let current = self.snapshot.load_full();
-        let next = Arc::new(scan::rescan(&self.root, &current)?);
+        let next = Arc::new(scan::whole(&self.root, self.lock_timeout(), || {
+            scan::rescan(&self.root, &current)
+        })?);
         self.snapshot.compare_and_swap(&current, next);
         self.saw_head(head);
         Ok(())
@@ -391,7 +400,9 @@ impl Store {
         if scan::read_generation(&self.root)? == current.generation && !self.head_moved(&head) {
             return Ok(());
         }
-        let next = Arc::new(scan::rescan(&self.root, &current)?);
+        let next = Arc::new(scan::whole(&self.root, self.lock_timeout(), || {
+            scan::rescan(&self.root, &current)
+        })?);
         self.snapshot.compare_and_swap(&current, next);
         self.saw_head(head);
         Ok(())

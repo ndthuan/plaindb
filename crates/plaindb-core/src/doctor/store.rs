@@ -26,7 +26,8 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
         journal_check(root),
         lock_check(root),
     ];
-    match scan::full_scan(root) {
+    let timeout = std::time::Duration::from_millis(config.lock_timeout_ms);
+    match scan::whole(root, timeout, || scan::full_scan(root)) {
         Ok(snapshot) => {
             checks.extend(document_checks(&snapshot));
             checks.push(cache_check(root, &snapshot));
@@ -59,7 +60,7 @@ fn lock_check(root: &Path) -> Check {
     let held = OpenOptions::new()
         .read(true)
         .open(root.join(STATE_DIR).join(LOCK_FILE))
-        .map(|file| match file.try_lock() {
+        .map(|file| match file.try_lock_shared() {
             Ok(()) => {
                 let _ = file.unlock();
                 false

@@ -195,10 +195,9 @@ fn a_long_lived_store_finishes_a_journal_left_by_a_crash() {
 }
 
 #[test]
-fn opening_while_a_writer_holds_the_lock_leaves_its_journal_alone() {
+fn opening_while_a_writer_holds_the_lock_waits_for_its_whole_transaction() {
     let temp = tempfile::tempdir().unwrap();
     seeded_store(temp.path());
-    let before = documents(temp.path());
     let mut child = crash_writer(
         temp.path(),
         &[("PLAINDB_TEST_HOLD_LOCK_MS", "1500".to_owned())],
@@ -206,11 +205,8 @@ fn opening_while_a_writer_holds_the_lock_leaves_its_journal_alone() {
     .spawn()
     .unwrap();
     wait_for_record(temp.path(), &mut child);
-    let journal = fs::read(journal_path(temp.path())).unwrap();
     let store = Store::open(temp.path()).unwrap();
-    assert_eq!(fs::read(journal_path(temp.path())).unwrap(), journal);
-    assert_eq!(documents(temp.path()), before);
-    assert!(store.get("main", "items", "c1").unwrap().is_none());
+    assert_committed(&store);
     assert!(child.wait().unwrap().success());
     assert!(journal_is_empty(temp.path()));
     assert_committed(&store);

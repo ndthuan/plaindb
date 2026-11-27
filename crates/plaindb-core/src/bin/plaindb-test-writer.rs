@@ -72,6 +72,22 @@ fn run_transactions(store: &Store, count: u64) -> Result<()> {
     Ok(())
 }
 
+fn run_put_all(store: &Store, value: u64) -> Result<()> {
+    let ops = store
+        .list_ids(DB, COLLECTION)?
+        .into_iter()
+        .map(|id| Op::Put {
+            db: DB.to_owned(),
+            coll: COLLECTION.to_owned(),
+            id,
+            doc: doc(json!({ "v": value })),
+            if_version: None,
+        })
+        .collect();
+    store.apply(Tx::new(ops))?;
+    Ok(())
+}
+
 fn run_crash(store: &Store) -> Result<()> {
     let ops = vec![
         insert(Some("c1"), json!({ "v": 1 })),
@@ -248,7 +264,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: plaindb-test-writer <store> <insert|patch|tx|crash|open|soak|push|gc> [count] [log]"
+            "usage: plaindb-test-writer <store> <insert|patch|tx|put-all|crash|open|soak|push|gc> [count] [log]"
         );
         return ExitCode::from(2);
     }
@@ -257,6 +273,7 @@ fn main() -> ExitCode {
         "insert" => run_inserts(&store, count),
         "patch" => run_patches(&store, count),
         "tx" => run_transactions(&store, count),
+        "put-all" => run_put_all(&store, count),
         "crash" => run_crash(&store),
         "open" => Ok(()),
         "push" => store.push().map(|outcome| println!("{outcome:?}")),

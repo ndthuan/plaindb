@@ -65,6 +65,15 @@ mod enabled {
         {
             crash();
         }
+        let pause = var("PLAINDB_TEST_PAUSE_AFTER").and_then(|text| {
+            let (index, ms) = text.split_once(':')?;
+            Some((index.parse::<usize>().ok()?, ms.parse::<u64>().ok()?))
+        });
+        if let Some((index, ms)) = pause
+            && index == applied
+        {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
     }
 
     pub(crate) fn boot_id() -> Option<String> {

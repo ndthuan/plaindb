@@ -33,6 +33,13 @@ const TABLE: &[Row] = &[
         ],
     },
     Row {
+        anchor: "isolation",
+        tests: &[
+            "multiprocess::every_read_during_a_transaction_sees_all_of_it_or_none",
+            "multiprocess::a_store_whose_lock_cannot_be_opened_is_read_through_a_checked_scan",
+        ],
+    },
+    Row {
         anchor: "hand-edit",
         tests: &[
             "writes::a_hand_edit_after_open_is_never_overwritten",
