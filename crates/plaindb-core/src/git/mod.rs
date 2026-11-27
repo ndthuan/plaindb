@@ -42,6 +42,7 @@ pub(crate) use missing::{
     retry as retry_missing_commits,
 };
 pub(crate) use pending::append as append_pending;
+pub(crate) use push::{head_branch, head_shown};
 
 pub const GITIGNORE_FILE: &str = ".gitignore";
 pub const GITIGNORE_LINE: &str = ".plaindb/";
@@ -51,6 +52,7 @@ pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
 pub const GIT_NOT_FOUND_WARNING: &str = "git_not_found";
 pub const GIT_BINARY_IGNORED_WARNING: &str = "git_binary_ignored";
 pub const GIT_REPOSITORY_MISSING_WARNING: &str = "git_repository_missing";
+pub const HEAD_OFF_BRANCH_WARNING: &str = "head_off_branch";
 const GIT_DIR: &str = ".git";
 const FALLBACK_NAME: &str = "plaindb";
 const FALLBACK_EMAIL: &str = "plaindb@localhost";

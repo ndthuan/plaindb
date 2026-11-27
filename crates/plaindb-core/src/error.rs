@@ -20,6 +20,7 @@ pub enum ErrorCode {
     GitDisabled,
     GitNotFound,
     RemoteAhead,
+    HeadOffBranch,
     Io,
 }
 
@@ -42,6 +43,7 @@ impl ErrorCode {
             Self::GitDisabled => "git_disabled",
             Self::GitNotFound => "git_not_found",
             Self::RemoteAhead => "remote_ahead",
+            Self::HeadOffBranch => "head_off_branch",
             Self::Io => "io",
         }
     }

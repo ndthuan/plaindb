@@ -601,3 +601,27 @@ fn a_remote_that_is_a_git_option_is_a_store_config_error_not_a_crash() {
     assert!(String::from_utf8_lossy(&push.stdout).contains("invalid_config"));
     assert!(!injected.exists());
 }
+
+#[test]
+fn a_head_off_the_branch_is_an_error_that_names_the_switch() {
+    let fixture = fixture("on-commit");
+    git(&fixture.store, &["checkout", "-q", "-b", "other"]);
+    let report = doctor(&fixture.store, &["--offline"]);
+    assert_eq!(report.code, Some(1));
+    assert_eq!(report.status("git_head_branch"), "error");
+    let fix = report.check("git_head_branch")["fix"]
+        .as_str()
+        .expect("a fix")
+        .to_owned();
+    assert!(fix.contains("switch main"), "{fix}");
+    let output = plaindb(&fixture.store, &["--json", "push"]);
+    assert_ne!(output.status.code(), Some(0));
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    assert_eq!(parsed["error"]["code"], "head_off_branch", "{parsed}");
+    assert_eq!(parsed["error"]["details"]["head"], "other");
+    git(&fixture.store, &["switch", "-q", "main"]);
+    assert_eq!(
+        doctor(&fixture.store, &["--offline"]).status("git_head_branch"),
+        "ok"
+    );
+}

@@ -465,6 +465,21 @@ impl Store {
                 }),
             });
         }
+        if status.git.enabled && git::has_repository(&self.root) {
+            let head = git::head_branch(&self.root)?;
+            if head.as_deref() != Some(status.git.branch.as_str()) {
+                status.warnings.push(Warning {
+                    code: git::HEAD_OFF_BRANCH_WARNING.to_owned(),
+                    db: String::new(),
+                    collection: String::new(),
+                    path: self.root.clone(),
+                    details: serde_json::json!({
+                        "head": git::head_shown(head.as_deref()),
+                        "branch": status.git.branch,
+                    }),
+                });
+            }
+        }
         if read_config(&self.root)?.git_binary.is_some() {
             status.warnings.push(Warning {
                 code: git::GIT_BINARY_IGNORED_WARNING.to_owned(),

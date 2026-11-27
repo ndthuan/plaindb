@@ -69,6 +69,43 @@ fn git_not_found() -> Error {
     Error::new(ErrorCode::GitNotFound, "the git binary was not found")
 }
 
+pub(crate) const DETACHED_HEAD: &str = "detached";
+
+pub(crate) fn head_branch(root: &Path) -> Result<Option<String>> {
+    let repo = open(root)?;
+    Ok(repo.head_name().map_err(git_error)?.and_then(|name| {
+        name.as_bstr()
+            .strip_prefix(b"refs/heads/")
+            .map(|short| String::from_utf8_lossy(short).into_owned())
+    }))
+}
+
+pub(crate) fn head_shown(head: Option<&str>) -> &str {
+    head.unwrap_or(DETACHED_HEAD)
+}
+
+fn head_off_branch(head: Option<&str>, branch: &str) -> Error {
+    let head = head_shown(head);
+    Error::new(
+        ErrorCode::HeadOffBranch,
+        format!("HEAD is on {head}, the store pushes {branch}"),
+    )
+    .with_detail("head", head)
+    .with_detail("branch", branch)
+}
+
+fn check_head_branch(root: &Path, config: &StoreConfig) -> Result<()> {
+    let head = head_branch(root)?;
+    if head.as_deref() == Some(config.branch.as_str()) {
+        return Ok(());
+    }
+    let error = head_off_branch(head.as_deref(), &config.branch);
+    let mut state = read_state(root)?;
+    state.last_push_error = Some(error.message.clone());
+    write_state(root, &state)?;
+    Err(error)
+}
+
 fn push_failed(message: &str) -> Error {
     Error::new(ErrorCode::Io, message).with_detail("reason", "push_failed")
 }
@@ -171,6 +208,7 @@ fn run(root: &Path, config: &StoreConfig) -> Result<PushOutcome> {
     if read_state(root)?.remote_ahead {
         return Err(remote_ahead_error());
     }
+    check_head_branch(root, config)?;
     let mut pushed_any = false;
     loop {
         let Some(lock) = try_lock_file(root, PUSH_LOCK_FILE)? else {

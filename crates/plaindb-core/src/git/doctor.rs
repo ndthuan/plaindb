@@ -36,6 +36,7 @@ pub(crate) fn checks(root: &Path, config: &StoreConfig, options: DoctorOptions) 
     vec![
         binary_check(root, config, &status),
         remote_check(root, &status, options),
+        head_branch_check(root, &status),
         unpushed_check(&status),
         remote_ahead_check(&status),
         last_push_check(&status),
@@ -139,6 +140,49 @@ fn remote_check(root: &Path, status: &GitStatus, options: DoctorOptions) -> Chec
         Ok(run) => unreachable_remote(status, &redacted(root, status, run.stderr.trim()), details),
         Err(source) => unreachable_remote(status, &source.to_string(), details),
     }
+}
+
+pub(crate) fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn head_branch_check(root: &Path, status: &GitStatus) -> Check {
+    let head = match super::head_branch(root) {
+        Ok(head) => head,
+        Err(error) => {
+            return Check::error(Group::Git, "git_head_branch", error.message)
+                .with_details(error.details)
+                .with_fix("repair the repository in the store directory");
+        }
+    };
+    let details = json!({
+        "head": super::head_shown(head.as_deref()),
+        "branch": status.branch,
+    });
+    if head.as_deref() == Some(status.branch.as_str()) {
+        return Check::ok(
+            Group::Git,
+            "git_head_branch",
+            format!("HEAD is on {}, the branch the store pushes", status.branch),
+        )
+        .with_details(details);
+    }
+    let switch = format!("git -C {} switch {}", shell_quote(root), status.branch);
+    let fix = match &head {
+        Some(other) => format!("{switch}, or plaindb config set branch {other}"),
+        None => switch,
+    };
+    Check::error(
+        Group::Git,
+        "git_head_branch",
+        format!(
+            "HEAD is on {}, the store pushes {}",
+            super::head_shown(head.as_deref()),
+            status.branch
+        ),
+    )
+    .with_details(details)
+    .with_fix(fix)
 }
 
 fn redacted(root: &Path, status: &GitStatus, text: &str) -> String {

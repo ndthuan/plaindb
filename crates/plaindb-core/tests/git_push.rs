@@ -448,3 +448,186 @@ fn the_status_and_doctor_show_an_https_remote_without_its_credentials() {
         }
     }
 }
+
+#[cfg(unix)]
+fn recording_git(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let calls = dir.join("calls");
+    let recorder = dir.join("recording-git");
+    fs::write(
+        &recorder,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nexec {real} \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+    (recorder, calls)
+}
+
+fn push_calls(calls: &Path) -> usize {
+    fs::read_to_string(calls)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.split(' ').any(|word| word == "push"))
+        .count()
+}
+
+fn doctor_check(root: &Path, id: &str) -> plaindb_core::doctor::Check {
+    plaindb_core::doctor::inspect(root, plaindb_core::doctor::DoctorOptions { offline: true })
+        .checks
+        .into_iter()
+        .find(|check| check.id == id)
+        .unwrap_or_else(|| panic!("no check {id}"))
+}
+
+fn warning_codes(store: &Store) -> Vec<String> {
+    store
+        .status()
+        .unwrap()
+        .warnings
+        .into_iter()
+        .map(|warning| warning.code)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_push_from_another_branch_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    assert_eq!(pushed(&store, "a", 1).push, Some(PushOutcome::Ok));
+    let delivered = git(&remote, &["rev-parse", "main"]);
+    let (recorder, calls) = recording_git(dir.path());
+    plaindb_core::set_git_program(&root, Some(recorder.to_str().unwrap().to_owned()));
+    git(&root, &["checkout", "-q", "-b", "other"]);
+
+    assert_eq!(pushed(&store, "b", 2).push, Some(PushOutcome::Failed));
+    let error = store.push().unwrap_err();
+    assert_eq!(error.code, ErrorCode::HeadOffBranch);
+    assert_eq!(error.code.as_str(), "head_off_branch");
+    assert_eq!(error.message, "HEAD is on other, the store pushes main");
+    assert_eq!(error.details["head"], "other");
+    assert_eq!(error.details["branch"], "main");
+    assert_eq!(git(&remote, &["rev-parse", "main"]), delivered);
+    assert_eq!(push_calls(&calls), 0);
+
+    git(&root, &["checkout", "-q", "--detach"]);
+    let error = store.push().unwrap_err();
+    assert_eq!(error.code, ErrorCode::HeadOffBranch);
+    assert_eq!(error.details["head"], "detached");
+    assert_eq!(push_calls(&calls), 0);
+}
+
+#[test]
+fn doctor_and_status_name_a_head_off_the_branch_until_it_is_switched_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    pushed(&store, "a", 1);
+    assert_eq!(
+        doctor_check(&root, "git_head_branch").status,
+        plaindb_core::doctor::CheckStatus::Ok
+    );
+    git(&root, &["checkout", "-q", "-b", "other"]);
+
+    let check = doctor_check(&root, "git_head_branch");
+    assert_eq!(check.status, plaindb_core::doctor::CheckStatus::Error);
+    let quoted = format!("'{}'", root.display());
+    assert_eq!(
+        check.fix.as_deref(),
+        Some(format!("git -C {quoted} switch main, or plaindb config set branch other").as_str())
+    );
+    let warning = store
+        .status()
+        .unwrap()
+        .warnings
+        .into_iter()
+        .find(|warning| warning.code == "head_off_branch")
+        .unwrap();
+    assert_eq!(warning.details["head"], "other");
+    assert_eq!(warning.details["branch"], "main");
+
+    git(&root, &["checkout", "-q", "--detach"]);
+    assert_eq!(
+        doctor_check(&root, "git_head_branch").fix.as_deref(),
+        Some(format!("git -C {quoted} switch main").as_str())
+    );
+
+    git(&root, &["switch", "-q", "main"]);
+    assert_eq!(
+        doctor_check(&root, "git_head_branch").status,
+        plaindb_core::doctor::CheckStatus::Ok
+    );
+    assert!(!warning_codes(&store).contains(&"head_off_branch".to_owned()));
+    pushed(&store, "c", 3);
+    assert_eq!(store.push().unwrap(), PushOutcome::Ok);
+    assert_eq!(
+        git(&remote, &["rev-parse", "main"]),
+        git(&root, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn a_write_on_another_branch_records_why_its_push_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    pushed(&store, "a", 1);
+    git(&root, &["checkout", "-q", "-b", "other"]);
+    let result = pushed(&store, "b", 2);
+    assert_eq!(result.push, Some(PushOutcome::Failed));
+    assert_eq!(store.get("main", "items", "b").unwrap().unwrap().0["n"], 2);
+    assert_eq!(
+        store.status().unwrap().git.last_push_error.as_deref(),
+        Some("HEAD is on other, the store pushes main")
+    );
+}
+
+#[test]
+fn the_branch_setting_must_name_the_checked_out_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    pushed(&store, "a", 1);
+    let error = store.set_setting("branch", "backup").unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(
+        error.message,
+        "branch must name the checked-out branch (main); switch with git first"
+    );
+    assert_eq!(store.config().branch, "main");
+
+    git(&root, &["switch", "-q", "-c", "backup"]);
+    store.set_setting("branch", "backup").unwrap();
+    assert_eq!(store.config().branch, "backup");
+    assert_eq!(store.push().unwrap(), PushOutcome::Ok);
+    assert_eq!(
+        git(&remote, &["rev-parse", "backup"]),
+        git(&root, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn the_branch_setting_is_free_before_git_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path().join("store")).unwrap();
+    store.set_setting("branch", "backup").unwrap();
+    assert_eq!(store.config().branch, "backup");
+}

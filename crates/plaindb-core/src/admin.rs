@@ -3,7 +3,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::config::{
-    CollectionMeta, CommitMode, Durability, Format, IndexSpec, STORE_FORMAT, to_file_bytes,
+    CollectionMeta, CommitMode, Durability, Format, IndexSpec, STORE_FORMAT, StoreConfig,
+    to_file_bytes,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::git;
@@ -190,6 +191,9 @@ impl Store {
         let before = read_config(&self.root)?;
         let mut config = before.clone();
         config.set(key, value)?;
+        if key == "branch" {
+            self.check_branch_is_checked_out(&config)?;
+        }
         if config == before {
             return Ok(());
         }
@@ -207,6 +211,25 @@ impl Store {
             self.commit_pending(Some(&subject), None)?;
         }
         Ok(())
+    }
+
+    fn check_branch_is_checked_out(&self, config: &StoreConfig) -> Result<()> {
+        if !config.git || !git::has_repository(&self.root) {
+            return Ok(());
+        }
+        let head = git::head_branch(&self.root)?;
+        if head.as_deref() == Some(config.branch.as_str()) {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorCode::InvalidConfig,
+            format!(
+                "branch must name the checked-out branch ({}); switch with git first",
+                git::head_shown(head.as_deref())
+            ),
+        )
+        .with_detail("key", "branch")
+        .with_detail("value", config.branch.as_str()))
     }
 
     pub fn set_durability(&self, durability: Durability) -> Result<()> {
