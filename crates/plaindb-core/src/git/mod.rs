@@ -104,7 +104,7 @@ pub(crate) fn git_disabled() -> Error {
 pub(crate) fn repository_missing() -> Error {
     Error::new(
         ErrorCode::GitDisabled,
-        "git is on but the store has no .git directory",
+        "git is on but the store has no .git directory: run plaindb git enable to start a new history",
     )
     .with_detail("reason", "repository_missing")
 }
@@ -422,10 +422,6 @@ pub(crate) fn prepare_write(root: &Path) -> Result<bool> {
     if !config.git {
         return Ok(false);
     }
-    if !root.join(GIT_DIR).exists() {
-        init_repo(root, &config.branch)?;
-        ensure_gitignore(root)?;
-    }
     let repo = open(root)?;
     if head_id(&repo)?.is_none() {
         commit_worktree(root, ENABLE_SUBJECT)?;
@@ -463,9 +459,15 @@ impl Store {
 
     pub(crate) fn turn_git_on(&self, subject: &str) -> Result<()> {
         let _push = self.push_guard();
-        let _lock = self.begin_write()?;
+        let _lock = self.begin_write_without_repository()?;
         let mut config = read_config(&self.root)?;
         if config.git {
+            if has_repository(&self.root) {
+                return Ok(());
+            }
+            init_repo(&self.root, &config.branch)?;
+            ensure_gitignore(&self.root)?;
+            commit_worktree(&self.root, subject)?;
             return Ok(());
         }
         if !self.root.join(GIT_DIR).exists() {

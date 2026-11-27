@@ -629,3 +629,114 @@ async fn status_hides_the_credentials_of_an_https_remote() {
     assert!(!cli_status.to_string().contains("s3cret"));
     session.cancel().await.expect("the server stops");
 }
+
+fn set_tree_writable(path: &Path, writable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).expect("the path exists");
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    permissions.set_mode(if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    });
+    if writable {
+        fs::set_permissions(path, permissions.clone()).expect("permissions change");
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).expect("the directory reads") {
+            set_tree_writable(&entry.expect("an entry").path(), writable);
+        }
+    }
+    if !writable {
+        fs::set_permissions(path, permissions).expect("permissions change");
+    }
+}
+
+fn recording_git(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let real = StdCommand::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("sh runs");
+    let real = String::from_utf8(real.stdout)
+        .expect("text")
+        .trim()
+        .to_owned();
+    let log = dir.join("git-calls.log");
+    let script = dir.join("recording-git");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real
+        ),
+    )
+    .expect("the script is written");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("the script runs");
+    (script, log)
+}
+
+#[tokio::test]
+async fn a_read_only_server_answers_on_a_read_only_store_without_the_network() {
+    let dir = TempDir::new().expect("a temporary directory");
+    let store = dir.path().join("store");
+    assert_eq!(cli(&store, &["init", "--git"])["ok"], true);
+    assert_eq!(cli(&store, &["db", "create", "app"])["ok"], true);
+    assert_eq!(
+        cli(
+            &store,
+            &["collection", "create", "app", "notes", "--format", "json"]
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        cli(
+            &store,
+            &["insert", "app", "notes", "a", "--data", r#"{"n":1}"#]
+        )["ok"],
+        true
+    );
+    let remote = dir.path().join("remote.git");
+    let remote_url = remote.to_string_lossy().into_owned();
+    assert_eq!(
+        cli(&store, &["git", "remote", "set", &remote_url])["ok"],
+        true
+    );
+    let (git, log) = recording_git(dir.path());
+    set_tree_writable(&store, false);
+    if fs::write(store.join("probe"), b"x").is_ok() {
+        set_tree_writable(&store, true);
+        return;
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_plaindb"));
+    command
+        .arg("--store")
+        .arg(&store)
+        .arg("mcp")
+        .arg("--read-only")
+        .env("PLAINDB_GIT", &git);
+    let session =
+        ().serve(TokioChildProcess::new(command).expect("the server starts"))
+            .await
+            .expect("the handshake succeeds");
+    let found = succeed(
+        &session,
+        "plaindb_find",
+        json!({"db": "app", "collection": "notes"}),
+    )
+    .await;
+    assert_eq!(found["docs"].as_array().map(Vec::len), Some(1), "{found}");
+    succeed(&session, "plaindb_doctor", json!({})).await;
+    session.cancel().await.expect("the server stops");
+    set_tree_writable(&store, true);
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("ls-remote") && !calls.contains("fetch"),
+        "{calls}"
+    );
+}

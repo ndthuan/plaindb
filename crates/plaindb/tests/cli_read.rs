@@ -362,3 +362,121 @@ fn the_store_comes_from_the_environment_and_usage_errors_exit_two() {
     assert!(usage.stdout.is_empty());
     assert!(!usage.stderr.is_empty());
 }
+
+fn set_tree_writable(path: &Path, writable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).expect("the path exists");
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    permissions.set_mode(if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    });
+    if writable {
+        fs::set_permissions(path, permissions.clone()).expect("permissions change");
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).expect("the directory reads") {
+            set_tree_writable(&entry.expect("an entry").path(), writable);
+        }
+    }
+    if !writable {
+        fs::set_permissions(path, permissions).expect("permissions change");
+    }
+}
+
+type Files = std::collections::BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>;
+
+fn files_under(dir: &Path) -> Files {
+    let mut files = Files::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in fs::read_dir(&current).expect("the directory reads") {
+            let entry = entry.expect("an entry");
+            let path = entry.path();
+            if entry.file_type().expect("a type").is_dir() {
+                pending.push(path);
+            } else {
+                let modified = entry
+                    .metadata()
+                    .expect("metadata")
+                    .modified()
+                    .expect("a time");
+                let bytes = fs::read(&path).expect("the file reads");
+                files.insert(path, (bytes, modified));
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn every_read_command_answers_on_a_read_only_store() {
+    let dir = fixture(true);
+    let store = dir.path();
+    set_tree_writable(store, false);
+    if fs::write(store.join("probe"), b"x").is_ok() {
+        set_tree_writable(store, true);
+        return;
+    }
+    let before = files_under(store);
+    let commands: [(&str, &[&str]); 12] = [
+        ("get", &["get", "app", "notes", "n1"]),
+        ("find", &["find", "app", "notes"]),
+        ("count", &["count", "app", "notes"]),
+        ("distinct", &["distinct", "app", "notes", "tag"]),
+        ("history", &["history", "app", "notes", "n1"]),
+        ("status", &["status"]),
+        ("validate", &["validate"]),
+        ("doctor", &["doctor", "--offline"]),
+        ("config", &["config", "get"]),
+        ("dbs", &["db", "list"]),
+        ("collections", &["collection", "list", "app"]),
+        ("indexes", &["index", "list", "app", "notes"]),
+    ];
+    for (kind, args) in commands {
+        let run = plaindb(store, Some(kind), args);
+        assert_eq!(run.code, 0, "{args:?}: {} {}", run.stdout, run.stderr);
+    }
+    let export = human(store, &["export", "app", "notes", "--jsonl"]);
+    assert_eq!(export.code, 0, "{}", export.stderr);
+    assert_eq!(export.stdout.lines().count(), 5);
+    let after = files_under(store);
+    set_tree_writable(store, true);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_read_leaves_the_journal_and_the_repository_alone() {
+    let dir = fixture(true);
+    let config_path = dir.path().join("_store.json");
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(&config_path).expect("the config reads"))
+            .expect("the config parses");
+    config["checkpoint_interval"] = json!(1000);
+    fs::write(&config_path, config.to_string()).expect("the config is written");
+    let store = Store::open(dir.path()).expect("the store opens");
+    store
+        .apply(Tx::new(vec![Op::Put {
+            db: "app".to_owned(),
+            coll: "notes".to_owned(),
+            id: "n9".to_owned(),
+            doc: doc(json!({ "n": 9 })),
+            if_version: None,
+        }]))
+        .expect("the document is written");
+    std::mem::forget(store);
+    let journal = dir.path().join(".plaindb").join("journal.jsonl");
+    let journal_before = fs::read(&journal).expect("the journal reads");
+    assert!(!journal_before.is_empty());
+    let git_before = files_under(&dir.path().join(".git"));
+    let run = plaindb(dir.path(), Some("get"), &["get", "app", "notes", "n9"]);
+    assert_eq!(run.code, 0, "{}", run.stdout);
+    let journal_after = fs::read(&journal).expect("the journal reads");
+    assert_eq!(journal_after, journal_before);
+    assert_eq!(files_under(&dir.path().join(".git")), git_before);
+}

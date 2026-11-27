@@ -120,7 +120,7 @@ pub fn export(context: &Context, args: &ExportArgs) -> Result<Output> {
         )
         .with_detail("reason", "no_format"));
     }
-    let store = context.open()?;
+    let store = context.open_reader()?;
     match &args.out {
         Some(path) => {
             let exported = export_to(&store, args, File::create(path)?)?;

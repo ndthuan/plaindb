@@ -455,6 +455,39 @@ pub(crate) fn commit(
     Ok(outcome)
 }
 
+fn finish_unfinished(root: &Path, journals: &[Journal], durability: Durability) -> Result<bool> {
+    let generation = read_generation(root)?;
+    let unfinished: Vec<&Journal> = journals
+        .iter()
+        .filter(|journal| journal.generation > generation)
+        .collect();
+    if !unfinished.is_empty() {
+        remove_stray_temp_files(root, journals).map_err(recovery_failed)?;
+    }
+    for journal in &unfinished {
+        roll_forward(root, journal, durability).map_err(recovery_failed)?;
+    }
+    Ok(!unfinished.is_empty())
+}
+
+pub(crate) fn finish_files(root: &Path, state: &WriterState) -> Result<bool> {
+    let journals = read_settled(root, state.durability)?;
+    finish_unfinished(root, &journals, state.durability)
+}
+
+pub(crate) fn unfinished_count(root: &Path) -> Result<usize> {
+    let records = read_records(root)?;
+    if records.journals.is_empty() {
+        return Ok(0);
+    }
+    let generation = read_generation(root)?;
+    Ok(records
+        .journals
+        .iter()
+        .filter(|journal| journal.generation > generation)
+        .count())
+}
+
 pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
     let path = journal_path(root);
     if !commits_are_missing(root) && state.journal_seen == Some(file_stamp(&path)?) {
@@ -462,20 +495,10 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
     }
     state.journal_seen = None;
     let journals = read_settled(root, state.durability)?;
-    let generation = read_generation(root)?;
-    let unfinished: Vec<&Journal> = journals
-        .iter()
-        .filter(|journal| journal.generation > generation)
-        .collect();
-    if !unfinished.is_empty() {
-        remove_stray_temp_files(root, &journals).map_err(recovery_failed)?;
-    }
-    for journal in &unfinished {
-        roll_forward(root, journal, state.durability).map_err(recovery_failed)?;
-    }
+    let finished = finish_unfinished(root, &journals, state.durability)?;
     make_missing_commits(root, &journals);
     remember(root, state, &journals)?;
-    Ok(!unfinished.is_empty())
+    Ok(finished)
 }
 
 pub(crate) fn recover(root: &Path, state: &mut WriterState) -> Result<bool> {

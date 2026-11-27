@@ -444,12 +444,18 @@ fn a_store_without_git_makes_no_repository() {
 }
 
 #[test]
-fn a_store_copied_without_its_repository_starts_a_new_one() {
+fn a_store_copied_without_its_repository_starts_a_new_one_when_git_is_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     drop(git_store(root));
     fs::remove_dir_all(root.join(".git")).unwrap();
     let store = Store::open(root).unwrap();
+    assert!(!root.join(".git").exists());
+    let error = store
+        .apply(Tx::new(vec![insert("main", "a", json!({"n": 1}))]))
+        .unwrap_err();
+    assert_eq!(error.details["reason"], json!("repository_missing"));
+    store.enable_git().unwrap();
     assert_eq!(subjects(root), ["git: enable"]);
     store
         .apply(Tx::new(vec![insert("main", "a", json!({"n": 1}))]))

@@ -560,13 +560,31 @@ fn read_version(path: &std::path::Path) -> Result<Option<String>> {
 
 impl Store {
     pub(crate) fn begin_write(&self) -> Result<WriteLock> {
+        self.begin_write_checked(true)
+    }
+
+    pub(crate) fn begin_write_without_repository(&self) -> Result<WriteLock> {
+        self.begin_write_checked(false)
+    }
+
+    fn begin_write_checked(&self, needs_repository: bool) -> Result<WriteLock> {
+        if self.reader {
+            return Err(Error::new(
+                ErrorCode::InvalidQuery,
+                "the store was opened for reading",
+            ));
+        }
         let lock = WriteLock::acquire(&self.root, self.lock_timeout())?;
         let config = read_config(&self.root)?;
         let mut writer = self.writer();
         writer.configure(&config);
         journal::settle(&self.root, &mut writer)?;
         drop(writer);
-        let foreign = git::prepare_write(&self.root)?;
+        let foreign = if needs_repository {
+            git::prepare_write(&self.root)?
+        } else {
+            false
+        };
         let current = self.snapshot.load_full();
         if foreign || scan::read_generation(&self.root)? != current.generation {
             self.snapshot

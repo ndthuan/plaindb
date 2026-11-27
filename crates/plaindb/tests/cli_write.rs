@@ -787,3 +787,109 @@ fn a_write_whose_commit_fails_is_reported_as_written() {
         "insert app/notes/a3\ninsert app/notes/a2\ninsert app/notes/a1"
     );
 }
+
+fn git_store_at(store: &Path) {
+    succeed(store, "init", &["init", "--git"]);
+    succeed(store, "db_ack", &["db", "create", "app"]);
+    succeed(
+        store,
+        "collection_ack",
+        &["collection", "create", "app", "notes", "--format", "json"],
+    );
+    succeed(
+        store,
+        "write",
+        &["insert", "app", "notes", "a1", "--data", r#"{"t":1}"#],
+    );
+}
+
+fn refused_for_a_missing_repository(store: &Path, args: &[&str]) {
+    let run = plaindb(store, None, args);
+    assert_eq!(run.code, 1, "{args:?} should fail: {}", run.json);
+    assert_eq!(run.json["error"]["code"], "git_disabled", "{}", run.json);
+    assert_eq!(run.json["error"]["details"]["reason"], "repository_missing");
+    let message = run.json["error"]["message"].as_str().expect("a message");
+    assert!(message.contains("plaindb git enable"), "{message}");
+}
+
+#[test]
+fn a_missing_repository_is_reported_and_only_git_enable_makes_a_new_one() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    git_store_at(dir.path());
+    fs::remove_dir_all(dir.path().join(".git")).expect("the repository is removed");
+    let found = succeed(dir.path(), "get", &["get", "app", "notes", "a1"]);
+    assert_eq!(found["doc"]["t"], 1);
+    assert!(!dir.path().join(".git").exists());
+    let status = succeed(dir.path(), "status", &["status"]);
+    assert!(
+        status["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning["code"] == "git_repository_missing"),
+        "{status}"
+    );
+    refused_for_a_missing_repository(
+        dir.path(),
+        &["insert", "app", "notes", "a2", "--data", r#"{"t":2}"#],
+    );
+    assert!(!dir.path().join(".git").exists());
+    succeed(dir.path(), "git", &["git", "enable"]);
+    succeed(
+        dir.path(),
+        "write",
+        &["insert", "app", "notes", "a2", "--data", r#"{"t":2}"#],
+    );
+    assert_eq!(
+        git(dir.path(), &["log", "--format=%s"]),
+        "insert app/notes/a2\ngit: enable"
+    );
+}
+
+#[test]
+fn a_nested_store_without_its_repository_never_writes_to_the_outer_one() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let outer = dir.path().join("outer");
+    fs::create_dir_all(&outer).expect("the outer directory");
+    let outer_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&outer)
+            .args([
+                "-c",
+                "user.name=Sample",
+                "-c",
+                "user.email=sample@example.com",
+            ])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).expect("text")
+    };
+    outer_git(&["init", "-q", "-b", "main"]);
+    fs::write(outer.join("readme.txt"), "outer").expect("a file");
+    outer_git(&["add", "readme.txt"]);
+    outer_git(&["commit", "-q", "-m", "outer"]);
+    let store = outer.join("data").join("store");
+    git_store_at(&store);
+    fs::remove_dir_all(store.join(".git")).expect("the repository is removed");
+    let fingerprint = || {
+        (
+            outer_git(&["rev-list", "--all", "--count"]),
+            outer_git(&["remote", "-v"]),
+            outer_git(&["ls-files"]),
+        )
+    };
+    let before = fingerprint();
+    refused_for_a_missing_repository(&store, &["push"]);
+    refused_for_a_missing_repository(
+        &store,
+        &["insert", "app", "notes", "a2", "--data", r#"{"t":2}"#],
+    );
+    assert_eq!(fingerprint(), before);
+    assert!(!store.join(".git").exists());
+}

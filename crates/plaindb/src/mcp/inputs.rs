@@ -373,9 +373,13 @@ impl From<PushInput> for PushArgs {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DoctorInput {
-    #[schemars(description = "Do not contact the remote")]
-    #[serde(default)]
+    #[schemars(description = "Do not contact the remote; true unless set to false")]
+    #[serde(default = "offline_by_default")]
     pub offline: bool,
+}
+
+fn offline_by_default() -> bool {
+    true
 }
 
 impl From<DoctorInput> for DoctorArgs {

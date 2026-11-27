@@ -174,6 +174,10 @@ impl Context {
         Store::open(&self.store)
     }
 
+    pub fn open_reader(&self) -> Result<Store> {
+        Store::open_reader(&self.store)
+    }
+
     pub fn transaction(&self, ops: Vec<Op>) -> Tx {
         Tx {
             id: self.tx_id.clone(),
@@ -195,23 +199,27 @@ pub fn parse_json(code: ErrorCode, what: &str, text: &str) -> Result<Value> {
 
 fn run(context: &Context, command: Command) -> Result<Output> {
     match command {
-        Command::Get(args) => read::get(&context.open()?, &args),
-        Command::Find(args) => read::find(&context.open()?, &args),
-        Command::Count(args) => read::count(&context.open()?, &args),
-        Command::Distinct(args) => read::distinct(&context.open()?, &args),
-        Command::History(args) => read::history(&context.open()?, &args),
-        Command::Status => read::status(&context.open()?),
-        Command::Db(DbCommand::List) => read::list_dbs(&context.open()?),
+        Command::Get(args) => read::get(&context.open_reader()?, &args),
+        Command::Find(args) => read::find(&context.open_reader()?, &args),
+        Command::Count(args) => read::count(&context.open_reader()?, &args),
+        Command::Distinct(args) => read::distinct(&context.open_reader()?, &args),
+        Command::History(args) => read::history(&context.open_reader()?, &args),
+        Command::Status => read::status(&context.open_reader()?),
+        Command::Db(DbCommand::List) => read::list_dbs(&context.open_reader()?),
         Command::Collection(CollectionCommand::List(args)) => {
-            read::list_collections(&context.open()?, &args)
+            read::list_collections(&context.open_reader()?, &args)
         }
         Command::Collection(CollectionCommand::Schema(SchemaCommand::Get(args))) => {
-            read::get_schema(&context.open()?, &args)
+            read::get_schema(&context.open_reader()?, &args)
         }
-        Command::Index(IndexCommand::List(args)) => read::list_indexes(&context.open()?, &args),
+        Command::Index(IndexCommand::List(args)) => {
+            read::list_indexes(&context.open_reader()?, &args)
+        }
         Command::Doctor(args) => Ok(doctor::run(context, &args)),
         Command::Init(args) => admin::init(context, &args),
-        Command::Config(ConfigCommand::Get(args)) => admin::config_get(&context.open()?, &args),
+        Command::Config(ConfigCommand::Get(args)) => {
+            admin::config_get(&context.open_reader()?, &args)
+        }
         Command::Config(ConfigCommand::Set(args)) => admin::config_set(context, &args),
         Command::Insert(args) => write::insert(context, &args),
         Command::Put(args) => write::put(context, &args),
@@ -226,7 +234,7 @@ fn run(context: &Context, command: Command) -> Result<Output> {
         Command::Push(args) => git::push(&context.open()?, &args),
         Command::Import(args) => transfer::import(context, &args),
         Command::Export(args) => transfer::export(context, &args),
-        Command::Validate => admin::validate(&context.open()?),
+        Command::Validate => admin::validate(&context.open_reader()?),
         Command::Rescan => admin::rescan(&context.open()?),
         Command::Reindex => admin::reindex(context),
         Command::Db(DbCommand::Create(args)) => admin::create_db(&context.open()?, &args),

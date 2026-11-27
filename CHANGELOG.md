@@ -8,6 +8,9 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
 - plaindb is now licensed under MIT instead of AGPL-3.0-only.
+- Read commands and MCP read tools open the store for reading: they change nothing but the index cache, never checkpoint the journal or touch `.git`, and work on a directory that cannot be written.
+- With git on and no `.git` directory, plaindb no longer starts a new repository by itself: writes fail with `git_disabled` and the reason `repository_missing` until `plaindb git enable`.
+- `plaindb_doctor` over MCP does not contact the remote unless `offline` is `false`.
 - A write that times out waiting for the lock no longer leaves a thread and an open file behind.
 - A damaged journal record followed by more data is kept in `.plaindb/journal.rejected-<id>` instead of being cut off, and `status` warns about it.
 - A write that reached the journal always succeeds. When a later step fails, the result carries `deferred` with the step and the error, the command prints a warning and exits 0, and `status` and `doctor` show git commits that are still to be made.

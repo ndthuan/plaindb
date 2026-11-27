@@ -29,6 +29,7 @@ pub const DB_FILE: &str = "_db.json";
 pub const META_FILE: &str = "_meta.json";
 pub const STATE_DIR: &str = ".plaindb";
 pub const JOURNAL_TRUNCATED_WARNING: &str = "journal_truncated";
+pub const JOURNAL_UNFINISHED_WARNING: &str = "journal_unfinished";
 
 #[derive(Debug)]
 pub(crate) struct WriterState {
@@ -69,6 +70,7 @@ pub struct Store {
     pub(crate) config: ArcSwap<StoreConfig>,
     pub(crate) snapshot: ArcSwap<Snapshot>,
     pub(crate) writer: Mutex<WriterState>,
+    pub(crate) reader: bool,
 }
 
 pub type Version = String;
@@ -138,14 +140,19 @@ fn open_snapshot(root: &Path) -> Result<Snapshot> {
         None => (scan::full_scan(root)?, false),
     };
     if !unchanged && let Err(error) = cache::write(root, &snapshot) {
-        tracing::warn!("the index cache could not be written: {}", error.message);
+        tracing::debug!("the index cache could not be written: {}", error.message);
     }
     Ok(snapshot)
 }
 
+fn state_dir_is_writable(root: &Path) -> bool {
+    fs::metadata(root.join(STATE_DIR)).is_ok_and(|metadata| !metadata.permissions().readonly())
+}
+
 impl Drop for Store {
     fn drop(&mut self) {
-        if journal::has_records(&self.root)
+        if !self.reader
+            && journal::has_records(&self.root)
             && let Err(error) = self.checkpoint_if_free()
         {
             tracing::warn!("the checkpoint on close failed: {}", error.message);
@@ -214,6 +221,7 @@ impl Store {
             config: ArcSwap::from_pointee(config),
             snapshot,
             writer,
+            reader: false,
         };
         if store.config.load().git {
             store.turn_git_on(git::INIT_STORE_SUBJECT)?;
@@ -227,7 +235,9 @@ impl Store {
         let mut writer = WriterState::new(&config);
         if let Some(_lock) = WriteLock::try_acquire(&root)? {
             journal::recover(&root, &mut writer)?;
-            git::prepare_write(&root)?;
+            if !config.git || git::has_repository(&root) {
+                git::prepare_write(&root)?;
+            }
         }
         let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
         Ok(Self {
@@ -235,6 +245,35 @@ impl Store {
             config: ArcSwap::from_pointee(config),
             snapshot,
             writer: Mutex::new(writer),
+            reader: false,
+        })
+    }
+
+    pub fn open_reader(dir: impl AsRef<Path>) -> Result<Self> {
+        let root = dir.as_ref().to_path_buf();
+        let config = read_config(&root)?;
+        let writer = WriterState::new(&config);
+        if journal::unfinished_count(&root)? > 0 && state_dir_is_writable(&root) {
+            match WriteLock::try_acquire(&root) {
+                Ok(Some(_lock)) => {
+                    if let Err(error) = journal::finish_files(&root, &writer) {
+                        tracing::warn!(
+                            "the unfinished journal was left as it is: {}",
+                            error.message
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::debug!("the write lock was not taken: {}", error.message),
+            }
+        }
+        let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
+        Ok(Self {
+            root,
+            config: ArcSwap::from_pointee(config),
+            snapshot,
+            writer: Mutex::new(writer),
+            reader: true,
         })
     }
 
@@ -418,6 +457,16 @@ impl Store {
                 details,
             });
         }
+        let unfinished = journal::unfinished_count(&self.root)?;
+        if unfinished > 0 {
+            status.warnings.push(Warning {
+                code: JOURNAL_UNFINISHED_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.clone(),
+                details: serde_json::json!({ "records": unfinished }),
+            });
+        }
         for file in journal::rejected_files(&self.root) {
             status.warnings.push(Warning {
                 code: JOURNAL_TRUNCATED_WARNING.to_owned(),
@@ -461,7 +510,7 @@ impl Store {
                 collection: String::new(),
                 path: self.root.clone(),
                 details: serde_json::json!({
-                    "message": "git is on but the store has no .git directory",
+                    "message": git::repository_missing().message,
                 }),
             });
         }

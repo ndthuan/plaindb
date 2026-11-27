@@ -93,7 +93,7 @@ pub fn catalog() -> Vec<Tool> {
             Read,
             "plaindb_status",
             "Shows the state of the store: document counts, invalid files, warnings and git.",
-            |context, _: NoInput| Ok(read::status(&context.open()?)?),
+            |context, _: NoInput| Ok(read::status(&context.open_reader()?)?),
         ),
         tool(
             Read,
@@ -105,20 +105,25 @@ pub fn catalog() -> Vec<Tool> {
             Read,
             "plaindb_list_dbs",
             "Lists the databases of the store.",
-            |context, _: NoInput| Ok(read::list_dbs(&context.open()?)?),
+            |context, _: NoInput| Ok(read::list_dbs(&context.open_reader()?)?),
         ),
         tool(
             Read,
             "plaindb_list_collections",
             "Lists the collections of a database.",
-            |context, input: DbInput| Ok(read::list_collections(&context.open()?, &input.into())?),
+            |context, input: DbInput| {
+                Ok(read::list_collections(
+                    &context.open_reader()?,
+                    &input.into(),
+                )?)
+            },
         ),
         tool(
             Read,
             "plaindb_get_schema",
             "Returns the JSON Schema of a collection, or null when it has none.",
             |context, input: CollectionInput| {
-                Ok(read::get_schema(&context.open()?, &input.into())?)
+                Ok(read::get_schema(&context.open_reader()?, &input.into())?)
             },
         ),
         tool(
@@ -126,38 +131,42 @@ pub fn catalog() -> Vec<Tool> {
             "plaindb_list_indexes",
             "Lists the indexes of a collection.",
             |context, input: CollectionInput| {
-                Ok(read::list_indexes(&context.open()?, &input.into())?)
+                Ok(read::list_indexes(&context.open_reader()?, &input.into())?)
             },
         ),
         tool(
             Read,
             "plaindb_get",
             "Reads one document with its version, now or as of a commit or time.",
-            |context, input: GetInput| Ok(read::get(&context.open()?, &input.into())?),
+            |context, input: GetInput| Ok(read::get(&context.open_reader()?, &input.into())?),
         ),
         tool(
             Read,
             "plaindb_find",
             "Finds documents matching a filter, with sorting and paging.",
-            |context, input: FindInput| Ok(read::find(&context.open()?, &input.into())?),
+            |context, input: FindInput| Ok(read::find(&context.open_reader()?, &input.into())?),
         ),
         tool(
             Read,
             "plaindb_count",
             "Counts the documents matching a filter.",
-            |context, input: CountInput| Ok(read::count(&context.open()?, &input.into())?),
+            |context, input: CountInput| Ok(read::count(&context.open_reader()?, &input.into())?),
         ),
         tool(
             Read,
             "plaindb_distinct",
             "Lists the distinct values of a field among the documents matching a filter.",
-            |context, input: DistinctInput| Ok(read::distinct(&context.open()?, &input.into())?),
+            |context, input: DistinctInput| {
+                Ok(read::distinct(&context.open_reader()?, &input.into())?)
+            },
         ),
         tool(
             Read,
             "plaindb_history",
             "Lists the commits that changed a document, newest first; needs git.",
-            |context, input: HistoryInput| Ok(read::history(&context.open()?, &input.into())?),
+            |context, input: HistoryInput| {
+                Ok(read::history(&context.open_reader()?, &input.into())?)
+            },
         ),
         tool(
             Write,
