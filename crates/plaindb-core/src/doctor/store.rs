@@ -31,6 +31,7 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
     match scan::whole(root, timeout, || scan::full_scan(root)) {
         Ok(snapshot) => {
             checks.extend(document_checks(&snapshot));
+            checks.push(skipped_files_check(&snapshot));
             checks.push(cache_check(root, &snapshot));
         }
         Err(error) => checks.push(
@@ -157,6 +158,42 @@ fn document_checks(snapshot: &Snapshot) -> Vec<Check> {
             "rename or remove all but one file of each pair, then run plaindb rescan",
         ),
     ]
+}
+
+fn skipped_files_check(snapshot: &Snapshot) -> Check {
+    let mut collections = Vec::new();
+    let mut total = 0;
+    for (db, db_snapshot) in snapshot.dbs.iter() {
+        for (collection, collection_snapshot) in db_snapshot.collections.iter() {
+            if collection_snapshot.skipped_count > 0 {
+                total += collection_snapshot.skipped_count;
+                collections.push(json!({
+                    "db": db,
+                    "collection": collection,
+                    "count": collection_snapshot.skipped_count,
+                    "names": collection_snapshot.skipped,
+                }));
+            }
+        }
+    }
+    if collections.is_empty() {
+        return Check::ok(
+            Group::Store,
+            "store_skipped_files",
+            "every file in a collection is read",
+        )
+        .with_details(json!({ "collections": [] }));
+    }
+    Check::warn(
+        Group::Store,
+        "store_skipped_files",
+        format!(
+            "{total} files in {} collections are not read",
+            collections.len()
+        ),
+    )
+    .with_details(json!({ "collections": collections }))
+    .with_fix("rename or remove the files; a document file is <id>.<json|yaml|md>")
 }
 
 fn problem_check(id: &'static str, found: &[String], what: &str, fix: &str) -> Check {

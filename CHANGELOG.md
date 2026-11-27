@@ -20,6 +20,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - Numbers compare exactly: integers beyond 2^53 stay apart, an integer equals the float of the same value, and `-0.0` equals `0.0`. Arrays compare element by element and objects by their sorted keys and values, in filters, sort, `distinct` and indexes.
 - YAML files and Markdown front matter are read as YAML 1.2: `NO`, `yes`, `off` and other YAML 1.1 words stay text, and `010` stays the text `010`. A leading byte order mark is dropped in every format and in a JSONL import, and a Markdown fence may end in spaces or tabs.
 - A Markdown write is checked against the schema with its `body`, as the scan checks it, so a write the scan would call invalid is refused with `schema_violation`.
+- A file that cannot be read no longer makes every command fail: it is an invalid file with the reason `unreadable`. A file over `limits.max_document_bytes`, or 64 MiB with no limit, is not read and is invalid with the reason `too_large`. Symlinks, names that are not UTF-8 and files with another document extension are counted in the status warning `skipped_files` and the doctor check `store_skipped_files`.
 
 ## [0.1.0] - 2026-11-26
 

@@ -662,3 +662,36 @@ fn find_all_refuses_a_cursor_and_a_limit() {
         assert_eq!(run.json["error"]["code"], "usage", "{extra:?}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn status_names_unreadable_and_skipped_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fixture(false);
+    let notes = dir.path().join("app/notes");
+    let locked = notes.join("u1.json");
+    std::fs::write(&locked, "{\"n\": 9}").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&locked).is_ok() {
+        return;
+    }
+    std::fs::write(notes.join("o.yml"), "n: 1\n").unwrap();
+    let get = plaindb(dir.path(), Some("get"), &["get", "app", "notes", "n1"]);
+    let run = plaindb(dir.path(), Some("status"), &["status"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(get.code, 0, "{}", get.stdout);
+    assert_eq!(run.code, 0, "{}", run.stdout);
+    assert_eq!(run.json["result"]["invalid"][0]["id"], "u1");
+    assert_eq!(run.json["result"]["invalid"][0]["reason"], "unreadable");
+    let skipped: Vec<&Value> = run.json["result"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["code"] == "skipped_files")
+        .collect();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(
+        skipped[0]["details"],
+        json!({"count": 1, "names": ["o.yml"]})
+    );
+}

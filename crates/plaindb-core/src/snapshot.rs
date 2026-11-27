@@ -44,6 +44,8 @@ pub struct CollectionSnapshot {
     pub files: RedBlackTreeMapSync<String, FileEntry>,
     pub case_duplicates: RedBlackTreeSetSync<String>,
     pub indexes: Indexes,
+    pub skipped: Vec<String>,
+    pub skipped_count: u64,
 }
 
 impl CollectionSnapshot {

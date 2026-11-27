@@ -283,3 +283,143 @@ fn rescan_never_touches_a_file() {
     Store::open(temp.path()).unwrap();
     assert_eq!(snapshot_of_files(&dir), before);
 }
+
+#[cfg(unix)]
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_is_invalid_and_the_rest_reads() {
+    if is_root() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    json_store(temp.path());
+    let dir = users(temp.path());
+    fs::write(dir.join("ok.json"), "{\"n\": 1}").unwrap();
+    fs::write(dir.join("u1.json"), "{\"n\": 2}").unwrap();
+    set_mode(&dir.join("u1.json"), 0o000);
+    let store = Store::open(temp.path()).unwrap();
+    assert!(store.get("main", "users", "ok").unwrap().is_some());
+    let status = store.status().unwrap();
+    assert_eq!(status.invalid.len(), 1);
+    assert_eq!(status.invalid[0].id, "u1");
+    assert_eq!(status.invalid[0].reason, "unreadable");
+    set_mode(&dir.join("u1.json"), 0o644);
+    store.rescan().unwrap();
+    let (doc, _) = store.get("main", "users", "u1").unwrap().unwrap();
+    assert_eq!(doc["n"], json!(2));
+    assert!(store.status().unwrap().invalid.is_empty());
+}
+
+#[test]
+fn a_file_over_the_scan_limit_is_not_read() {
+    let temp = tempfile::tempdir().unwrap();
+    json_store(temp.path());
+    let dir = users(temp.path());
+    fs::write(dir.join("ok.json"), "{\"n\": 1}").unwrap();
+    fs::File::create(dir.join("big.json"))
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let store = Store::open(temp.path()).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(store.get("main", "users", "ok").unwrap().is_some());
+    let status = store.status().unwrap();
+    assert_eq!(status.invalid.len(), 1);
+    assert_eq!(status.invalid[0].id, "big");
+    assert_eq!(status.invalid[0].reason, "too_large");
+}
+
+#[test]
+fn a_file_over_the_document_limit_is_too_large() {
+    let temp = tempfile::tempdir().unwrap();
+    json_store(temp.path());
+    let config_path = temp.path().join("_store.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["limits"]["max_document_bytes"] = json!(1000);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let dir = users(temp.path());
+    let padding = "x".repeat(2000);
+    fs::write(dir.join("wide.json"), format!("{{\"p\": \"{padding}\"}}")).unwrap();
+    fs::write(dir.join("ok.json"), "{\"n\": 1}").unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    assert!(store.get("main", "users", "ok").unwrap().is_some());
+    let status = store.status().unwrap();
+    assert_eq!(status.invalid.len(), 1);
+    assert_eq!(status.invalid[0].id, "wide");
+    assert_eq!(status.invalid[0].reason, "too_large");
+}
+
+#[cfg(unix)]
+#[test]
+fn skipped_entries_are_counted_per_collection() {
+    let temp = tempfile::tempdir().unwrap();
+    json_store(temp.path());
+    make_collection(
+        temp.path(),
+        "main",
+        "plans",
+        &CollectionMeta::new(Format::Yaml),
+    );
+    make_collection(
+        temp.path(),
+        "main",
+        "notes",
+        &CollectionMeta::new(Format::Md),
+    );
+    let dir = users(temp.path());
+    fs::write(dir.join("ok.json"), "{\"n\": 1}").unwrap();
+    std::os::unix::fs::symlink(dir.join("ok.json"), dir.join("l.json")).unwrap();
+    fs::write(dir.join("a b.json"), "{}").unwrap();
+    fs::write(dir.join("readme.txt"), "x").unwrap();
+    fs::create_dir(dir.join("sub")).unwrap();
+    let plans = temp.path().join("main/plans");
+    fs::write(plans.join("n.yml"), "a: 1\n").unwrap();
+    fs::write(plans.join("p.yaml"), "a: 1\n").unwrap();
+    fs::write(temp.path().join("main/notes/x.markdown"), "text\n").unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let status = store.status().unwrap();
+    let mut skipped: Vec<(String, serde_json::Value)> = status
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "skipped_files")
+        .map(|warning| (warning.collection.clone(), warning.details.clone()))
+        .collect();
+    skipped.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        skipped,
+        [
+            (
+                "notes".to_owned(),
+                json!({"count": 1, "names": ["x.markdown"]})
+            ),
+            ("plans".to_owned(), json!({"count": 1, "names": ["n.yml"]})),
+            ("users".to_owned(), json!({"count": 1, "names": ["l.json"]})),
+        ]
+    );
+    let users_warning = status
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "skipped_files" && warning.collection == "users")
+        .unwrap();
+    assert_eq!(users_warning.path, users(temp.path()));
+    assert_eq!(
+        status
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "invalid_name")
+            .count(),
+        1
+    );
+}

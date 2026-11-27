@@ -104,6 +104,7 @@ pub(crate) fn child_directories(
 }
 
 pub const UNKNOWN_SETTING_WARNING: &str = "unknown_setting";
+pub const SKIPPED_FILES_WARNING: &str = "skipped_files";
 
 pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     let bytes = match fs::read(root.join(STORE_FILE)) {
@@ -594,6 +595,18 @@ impl Store {
         }
         for (db, db_snapshot) in snapshot.dbs.iter() {
             for (collection, collection_snapshot) in db_snapshot.collections.iter() {
+                if collection_snapshot.skipped_count > 0 {
+                    status.warnings.push(Warning {
+                        code: SKIPPED_FILES_WARNING.to_owned(),
+                        db: db.clone(),
+                        collection: collection.clone(),
+                        path: self.root.join(db).join(collection),
+                        details: serde_json::json!({
+                            "count": collection_snapshot.skipped_count,
+                            "names": collection_snapshot.skipped,
+                        }),
+                    });
+                }
                 for (name, entry) in collection_snapshot.files.iter() {
                     status.store_bytes += entry.size;
                     let duplicate = collection_snapshot.is_duplicate(name);

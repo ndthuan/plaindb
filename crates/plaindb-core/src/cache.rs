@@ -22,7 +22,7 @@ use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 
 pub const CACHE_FILE: &str = "index-cache.bin";
 const CACHE_FORMAT: u32 = 2;
-pub const DECODER_REVISION: u32 = 3;
+pub const DECODER_REVISION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -50,6 +50,8 @@ struct CollectionRef<'a> {
     collection: &'a str,
     files: Vec<FileRef<'a>>,
     indexes: IndexDump,
+    skipped: &'a [String],
+    skipped_count: u64,
 }
 
 #[derive(Serialize)]
@@ -86,6 +88,8 @@ struct CollectionOwned {
     collection: String,
     files: Vec<FileOwned>,
     indexes: IndexDump,
+    skipped: Vec<String>,
+    skipped_count: u64,
 }
 
 #[derive(Deserialize)]
@@ -260,10 +264,10 @@ fn reject(root: &Path) {
 }
 
 fn assemble(root: &Path, generation: u64, body: Body, metas: Vec<DiskMeta>) -> Option<Snapshot> {
-    let mut cached: HashMap<(String, String), (Vec<FileOwned>, IndexDump)> = body
+    let mut cached: HashMap<(String, String), CollectionOwned> = body
         .collections
         .into_iter()
-        .map(|entry| ((entry.db, entry.collection), (entry.files, entry.indexes)))
+        .map(|entry| ((entry.db.clone(), entry.collection.clone()), entry))
         .collect();
     let mut dbs: RedBlackTreeMapSync<String, DbSnapshot> = RedBlackTreeMapSync::new_sync();
     for disk in metas {
@@ -272,12 +276,16 @@ fn assemble(root: &Path, generation: u64, body: Body, metas: Vec<DiskMeta>) -> O
         let key = (disk.db.clone(), disk.collection.clone());
         let mut ids = Vec::new();
         let mut dump = None;
-        if let Some((cached_files, cached_dump)) = cached.remove(&key) {
-            ids = cached_files.iter().map(|file| file.id.clone()).collect();
-            for file in cached_files {
+        let mut skipped = Vec::new();
+        let mut skipped_count = 0;
+        if let Some(entry) = cached.remove(&key) {
+            ids = entry.files.iter().map(|file| file.id.clone()).collect();
+            for file in entry.files {
                 files.insert_mut(file.name.clone(), file_entry(file, &dir));
             }
-            dump = Some(cached_dump);
+            dump = Some(entry.indexes);
+            skipped = entry.skipped;
+            skipped_count = entry.skipped_count;
         }
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         let indexes = match dump {
@@ -293,6 +301,8 @@ fn assemble(root: &Path, generation: u64, body: Body, metas: Vec<DiskMeta>) -> O
                 files,
                 case_duplicates,
                 indexes,
+                skipped,
+                skipped_count,
             },
         );
         dbs.insert_mut(disk.db, db_snapshot);
@@ -384,6 +394,8 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
                 .map(|(name, entry)| file_ref(name, entry))
                 .collect(),
             indexes: collection.indexes.dump(&lookup),
+            skipped: &collection.skipped,
+            skipped_count: collection.skipped_count,
         });
     }
     let body = BodyRef { collections };
@@ -423,6 +435,8 @@ pub fn same_files(left: &Snapshot, right: &Snapshot) -> bool {
 
 fn same_collection(left: &CollectionSnapshot, right: &CollectionSnapshot) -> bool {
     left.meta == right.meta
+        && left.skipped == right.skipped
+        && left.skipped_count == right.skipped_count
         && left.files.size() == right.files.size()
         && left.files.iter().all(|(name, left_entry)| {
             right

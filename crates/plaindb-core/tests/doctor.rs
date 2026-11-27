@@ -23,6 +23,7 @@ fn a_healthy_store_reports_stable_check_ids_and_no_error() {
         "documents_invalid",
         "documents_schema",
         "names_case",
+        "store_skipped_files",
         "index_cache",
         "filesystem_network",
         "filesystem_case",
@@ -283,4 +284,72 @@ fn an_unknown_store_setting_is_a_doctor_warning() {
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("durabilty"), "{}", check.message);
     assert!(check.fix.as_deref().unwrap().contains("known settings"));
+}
+
+#[cfg(unix)]
+#[test]
+fn skipped_files_are_a_doctor_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "users", Format::Json)
+        .unwrap();
+    let check_of = |store: &Store| {
+        store
+            .doctor(DoctorOptions { offline: true })
+            .checks
+            .into_iter()
+            .find(|check| check.id == "store_skipped_files")
+            .expect("the check is always reported")
+    };
+    assert_eq!(check_of(&store).status, CheckStatus::Ok);
+    let dir = temp.path().join("main/users");
+    fs::write(dir.join("ok.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(dir.join("ok.json"), dir.join("l.json")).unwrap();
+    fs::write(dir.join("o.yml"), "a: 1\n").unwrap();
+    store.rescan().unwrap();
+    let check = check_of(&store);
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert_eq!(check.message, "2 files in 1 collections are not read");
+    assert_eq!(
+        check.details,
+        json!({"collections": [
+            {"db": "main", "collection": "users", "count": 2, "names": ["l.json", "o.yml"]}
+        ]})
+    );
+    assert!(
+        check
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("<id>.<json|yaml|md>")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_is_an_invalid_document_in_doctor() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "users", Format::Json)
+        .unwrap();
+    let path = temp.path().join("main/users/u1.json");
+    fs::write(&path, "{}").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let report = store.doctor(DoctorOptions { offline: true });
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.id == "documents_invalid")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Error);
+    assert_eq!(check.details["first"], json!(["main/users/u1"]));
 }

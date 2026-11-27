@@ -26,6 +26,18 @@ pub(crate) const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"
 pub const GENERATION_FILE: &str = "generation";
 
 const CHECKED_ATTEMPTS: usize = 5;
+pub(crate) const SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const UNREADABLE_REASON: &str = "unreadable";
+pub(crate) const TOO_LARGE_REASON: &str = "too_large";
+pub(crate) const LISTED_SKIPPED: usize = 10;
+const DOCUMENT_EXTENSIONS: [&str; 5] = ["json", "yaml", "yml", "md", "markdown"];
+
+fn size_limit(root: &Path) -> u64 {
+    crate::store::read_config(root)
+        .ok()
+        .and_then(|config| config.limits.max_document_bytes)
+        .unwrap_or(SCAN_MAX_BYTES)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Mark {
@@ -81,6 +93,7 @@ pub fn read_generation(root: &Path) -> Result<u64> {
 
 pub fn rescan(root: &Path, prev: &Snapshot) -> Result<Snapshot> {
     let generation = read_generation(root)?;
+    let limit = size_limit(root);
     let mut dbs = RedBlackTreeMapSync::new_sync();
     for db in child_directories(root, DB_FILE, crate::names::validate_db_name)? {
         check_db_file(&root.join(&db).join(DB_FILE))?;
@@ -92,7 +105,8 @@ pub fn rescan(root: &Path, prev: &Snapshot) -> Result<Snapshot> {
             crate::names::validate_collection_name,
         )? {
             let prev_collection = prev_db.and_then(|entry| entry.collections.get(&collection));
-            let scanned = scan_collection(&root.join(&db).join(&collection), prev_collection)?;
+            let scanned =
+                scan_collection(&root.join(&db).join(&collection), prev_collection, limit)?;
             collections.insert_mut(collection, scanned);
         }
         dbs.insert_mut(db, DbSnapshot { collections });
@@ -185,54 +199,150 @@ fn modified_ns(metadata: &fs::Metadata) -> i128 {
         .unwrap_or(0)
 }
 
-fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<CollectionSnapshot> {
+fn is_document_name(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, extension)| DOCUMENT_EXTENSIONS.contains(&extension))
+}
+
+fn examined_every_scan(entry: &FileEntry) -> bool {
+    matches!(&entry.outcome, Outcome::Invalid(found)
+        if found.reason == UNREADABLE_REASON || found.reason == TOO_LARGE_REASON)
+}
+
+fn unread_entry(
+    path: &Path,
+    stem: &str,
+    reason: &str,
+    metadata: Option<&fs::Metadata>,
+) -> FileEntry {
+    let outcome = if validate_id(stem).is_err() {
+        Outcome::BadName {
+            path: path.to_path_buf(),
+        }
+    } else {
+        invalid(path, reason)
+    };
+    let mut entry = FileEntry {
+        id: stem.to_owned(),
+        size: 0,
+        mtime_ns: 0,
+        inode: 0,
+        outcome,
+    };
+    if let Some(metadata) = metadata {
+        stamp(&mut entry, metadata);
+    }
+    entry
+}
+
+pub(crate) fn read_entry(
+    path: &Path,
+    stem: &str,
+    meta: &CollectionMeta,
+    validator: Option<&jsonschema::Validator>,
+    metadata: &fs::Metadata,
+    limit: u64,
+) -> Option<FileEntry> {
+    if metadata.len() > limit {
+        return Some(unread_entry(path, stem, TOO_LARGE_REASON, Some(metadata)));
+    }
+    match fs::read(path) {
+        Ok(bytes) => Some(file_entry(path, stem, meta, validator, &bytes, metadata)),
+        Err(source) if source.kind() == ErrorKind::NotFound => None,
+        Err(_) => Some(unread_entry(path, stem, UNREADABLE_REASON, Some(metadata))),
+    }
+}
+
+fn scan_collection(
+    dir: &Path,
+    prev: Option<&CollectionSnapshot>,
+    limit: u64,
+) -> Result<CollectionSnapshot> {
     let meta = read_meta(dir)?;
     let reusable = prev.filter(|snapshot| snapshot.meta == meta);
     let validator = compile_validator(&meta, dir)?;
     let suffix = format!(".{}", meta.format.extension());
     let mut files = RedBlackTreeMapSync::new_sync();
     let mut changed = Vec::new();
+    let mut skipped = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(raw) => {
+                skipped.push(raw.to_string_lossy().into_owned());
+                continue;
+            }
         };
         if name.starts_with('.') || name == META_FILE {
             continue;
         }
-        let Some(stem) = name.strip_suffix(&suffix) else {
+        let path = entry.path();
+        let stem = name.strip_suffix(&suffix);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(source) if source.kind() == ErrorKind::NotFound => continue,
+            Err(_) => {
+                if let Some(stem) = stem {
+                    changed.push(name.clone());
+                    files.insert_mut(
+                        name.clone(),
+                        unread_entry(&path, stem, UNREADABLE_REASON, None),
+                    );
+                }
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            skipped.push(name);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(stem) = stem else {
+            if is_document_name(&name) {
+                skipped.push(name);
+            }
             continue;
         };
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(source) if source.kind() == ErrorKind::NotFound => continue,
-            Err(source) => return Err(source.into()),
+            Err(_) => {
+                changed.push(name.clone());
+                files.insert_mut(
+                    name.clone(),
+                    unread_entry(&path, stem, UNREADABLE_REASON, None),
+                );
+                continue;
+            }
         };
         let previous = reusable
             .and_then(|snapshot| snapshot.files.get(&name))
             .filter(|known| {
-                known.size == metadata.len()
+                !examined_every_scan(known)
+                    && known.size == metadata.len()
                     && known.mtime_ns == modified_ns(&metadata)
                     && known.inode == inode_of(&metadata)
             });
         let file_entry = match previous {
             Some(known) => known.clone(),
             None => {
-                changed.push(name.clone());
-                let path = entry.path();
-                let bytes = match fs::read(&path) {
-                    Ok(bytes) => bytes,
-                    Err(source) if source.kind() == ErrorKind::NotFound => continue,
-                    Err(source) => return Err(source.into()),
+                let Some(read) =
+                    read_entry(&path, stem, &meta, validator.as_ref(), &metadata, limit)
+                else {
+                    continue;
                 };
-                file_entry(&path, stem, &meta, validator.as_ref(), &bytes, &metadata)
+                changed.push(name.clone());
+                read
             }
         };
         files.insert_mut(name, file_entry);
     }
+    let skipped_count = u64::try_from(skipped.len()).unwrap_or(u64::MAX);
+    skipped.sort();
+    skipped.truncate(LISTED_SKIPPED);
     let case_duplicates = find_case_duplicates(&files);
     let indexes = match reusable {
         Some(known) => {
@@ -256,6 +366,8 @@ fn scan_collection(dir: &Path, prev: Option<&CollectionSnapshot>) -> Result<Coll
         files,
         case_duplicates,
         indexes,
+        skipped,
+        skipped_count,
     })
 }
 
@@ -331,25 +443,13 @@ pub(crate) struct FileRef<'a> {
     pub file_name: &'a str,
 }
 
-fn read_present(path: &Path) -> Result<Option<(fs::Metadata, Vec<u8>)>> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(source.into()),
-    };
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some((metadata, bytes))),
-        Err(source) if source.kind() == ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(source.into()),
-    }
-}
-
 pub(crate) fn refresh_files(
     root: &Path,
     prev: &Snapshot,
     files: &[FileRef<'_>],
 ) -> Result<Snapshot> {
     let mut next = prev.clone();
+    let limit = size_limit(root);
     for file in files {
         let refreshed =
             next.update_collection(file.db, file.collection, |collection| -> Result<()> {
@@ -359,21 +459,22 @@ pub(crate) fn refresh_files(
                 let Some(stem) = file.file_name.strip_suffix(&suffix) else {
                     return Ok(());
                 };
-                match read_present(&path)? {
-                    Some((metadata, bytes)) => {
+                let entry = match fs::metadata(&path) {
+                    Ok(metadata) => {
                         let validator = compile_validator(&collection.meta, &dir)?;
-                        let entry = file_entry(
+                        read_entry(
                             &path,
                             stem,
                             &collection.meta,
                             validator.as_ref(),
-                            &bytes,
                             &metadata,
-                        );
-                        collection.put_file(file.file_name, Some(entry));
+                            limit,
+                        )
                     }
-                    None => collection.put_file(file.file_name, None),
-                }
+                    Err(source) if source.kind() == ErrorKind::NotFound => None,
+                    Err(_) => Some(unread_entry(&path, stem, UNREADABLE_REASON, None)),
+                };
+                collection.put_file(file.file_name, entry);
                 collection.case_duplicates = find_case_duplicates(&collection.files);
                 Ok(())
             });
