@@ -254,3 +254,132 @@ fn commit_without_git_is_refused() {
     let error = store.commit(None, None).unwrap_err();
     assert_eq!(error.code, ErrorCode::GitDisabled);
 }
+
+fn commit_by_hand(root: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let mut add = vec!["add", "-f", "--"];
+    add.extend(files.iter().map(|(path, _)| *path));
+    git(root, &add);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Sample Writer",
+            "-c",
+            "user.email=writer@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "files by hand",
+        ],
+    );
+}
+
+fn tree_paths(root: &Path) -> Vec<String> {
+    git(root, &["ls-tree", "-r", "--name-only", "HEAD"])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_manual_commit_keeps_files_committed_outside_the_databases() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = manual_store(root);
+    store.commit(None, None).unwrap();
+    let foreign = ["scripts/run.sh", "docs/note.md", "main/.gitkeep"];
+    commit_by_hand(
+        root,
+        &[
+            (foreign[0], "echo run\n"),
+            (foreign[1], "a note\n"),
+            (foreign[2], ""),
+        ],
+    );
+    store
+        .apply(Tx::new(vec![insert("a", json!({"n": 1}))]))
+        .unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    let paths = tree_paths(root);
+    for path in foreign {
+        assert!(paths.contains(&path.to_owned()), "{path} in {paths:?}");
+    }
+    assert_eq!(
+        git(root, &["diff", "--name-only", "HEAD~1", "HEAD"]),
+        "main/items/a.json\n"
+    );
+}
+
+#[test]
+fn a_manual_commit_removes_every_file_of_a_dropped_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = manual_store(root);
+    store.create_db("old").unwrap();
+    store
+        .create_collection("old", "things", Format::Json)
+        .unwrap();
+    store
+        .apply(Tx::new(vec![Op::Insert {
+            db: "old".to_owned(),
+            coll: "things".to_owned(),
+            id: Some("t".to_owned()),
+            doc: doc(json!({"n": 1})),
+        }]))
+        .unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    assert!(tree_paths(root).contains(&"old/_db.json".to_owned()));
+    store.drop_db("old").unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    let paths = tree_paths(root);
+    assert!(
+        paths.iter().all(|path| !path.starts_with("old/")),
+        "{paths:?}"
+    );
+}
+
+#[test]
+fn a_manual_commit_removes_a_collection_deleted_by_hand() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = manual_store(root);
+    store
+        .create_collection("main", "gone", Format::Json)
+        .unwrap();
+    store
+        .apply(Tx::new(vec![Op::Insert {
+            db: "main".to_owned(),
+            coll: "gone".to_owned(),
+            id: Some("g".to_owned()),
+            doc: doc(json!({"n": 1})),
+        }]))
+        .unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    assert!(tree_paths(root).contains(&"main/gone/g.json".to_owned()));
+    fs::remove_dir_all(root.join("main/gone")).unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    let paths = tree_paths(root);
+    assert!(
+        paths.iter().all(|path| !path.starts_with("main/gone/")),
+        "{paths:?}"
+    );
+}
+
+#[test]
+fn a_manual_commit_takes_a_changed_store_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = manual_store(root);
+    store.commit(None, None).unwrap();
+    store.set_setting("gc_every", "7").unwrap();
+    store.commit(None, None).unwrap().unwrap();
+    assert_eq!(
+        git(root, &["diff", "--name-only", "HEAD~1", "HEAD"]),
+        "_store.json\n"
+    );
+}

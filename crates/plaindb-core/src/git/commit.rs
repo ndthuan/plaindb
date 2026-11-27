@@ -12,11 +12,13 @@ use gix::objs::tree::EntryKind;
 
 use super::message::{TX_ID_TRAILER, trailer_values};
 use super::{
-    clear_warning, git_error, head_id, in_scope, open, read_warning, signature, worktree_files,
-    write_last_commit,
+    GITIGNORE_FILE, clear_warning, git_error, head_id, in_scope, open, read_warning, signature,
+    worktree_files, write_last_commit,
 };
 use crate::error::Result;
 use crate::journal::Journal;
+use crate::names::validate_db_name;
+use crate::store::{DB_FILE, STORE_FILE};
 use crate::version::version_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,10 +289,33 @@ pub(crate) fn worktree_changes(root: &Path) -> Result<Vec<Change>> {
             });
         }
     }
+    let databases = database_names(root, &committed)?;
     for path in committed.keys() {
-        if !present.contains_key(path) {
+        if !present.contains_key(path) && is_removable(path, &databases) {
             changes.push(Change::Remove { path: path.clone() });
         }
     }
     Ok(changes)
+}
+
+fn database_names(root: &Path, committed: &BTreeMap<String, ObjectId>) -> Result<BTreeSet<String>> {
+    let mut names: BTreeSet<String> =
+        crate::store::child_directories(root, DB_FILE, validate_db_name)?
+            .into_iter()
+            .collect();
+    names.extend(committed.keys().filter_map(|path| {
+        path.split_once('/')
+            .filter(|(_, rest)| *rest == DB_FILE)
+            .map(|(db, _)| db.to_owned())
+    }));
+    Ok(names)
+}
+
+fn is_removable(path: &str, databases: &BTreeSet<String>) -> bool {
+    if path == STORE_FILE || path == GITIGNORE_FILE {
+        return true;
+    }
+    path.split_once('/')
+        .is_some_and(|(db, _)| databases.contains(db))
+        && !path.split('/').any(|component| component.starts_with('.'))
 }

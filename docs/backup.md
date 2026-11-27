@@ -1,7 +1,7 @@
 # Backup and restore
 
 
-Git is optional. With it on, every transaction becomes one commit, or in manual mode one commit gathers many transactions, and each commit carries the ids of the transactions it holds.
+Git is optional. With it on, every transaction becomes one commit, or in manual mode one commit gathers many transactions, and each commit carries the ids of the transactions it holds. `plaindb commit` commits every difference between the databases on disk and HEAD; a file committed with git outside a database, like `docs/note.md`, or under a hidden name, like `main/.gitkeep`, is left as it is, while the files of a dropped database are removed.
 
 To back a store up:
 
