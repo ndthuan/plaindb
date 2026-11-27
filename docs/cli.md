@@ -17,7 +17,7 @@ plaindb export app notes --jsonl --out notes.jsonl
 
 A filter is a JSON object. A field name alone means equality, and `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$exists`, `$prefix`, `$and`, `$or` and `$text` (search in the text index) build the rest. `plaindb index add` declares an index on a field, and a query on an indexed field does not read the other documents.
 
-Run `plaindb --help` for every command. Settings are read and changed with `plaindb config get` and `plaindb config set`: `commit`, `push`, `remote`, `branch`, `lock_timeout_ms`, `durability`, `gc_every`, `git_binary`, `limits.max_document_bytes`, `limits.max_results` and `limits.max_scan_ms`. `config get` without a key prints every setting with its default, and a value a setting cannot take is refused with `invalid_config`.
+Run `plaindb --help` for every command. Settings are read and changed with `plaindb config get` and `plaindb config set`: `commit`, `push`, `remote`, `branch`, `lock_timeout_ms`, `durability`, `gc_every`, `limits.max_document_bytes`, `limits.max_results` and `limits.max_scan_ms`. `config get` without a key prints every setting with its default, and a value a setting cannot take is refused with `invalid_config`. The `git` program is not a setting: it comes from the `PLAINDB_GIT` environment variable, an absolute path or a program name, or else `git` on `PATH`.
 
 With `--json` every command prints exactly one line:
 

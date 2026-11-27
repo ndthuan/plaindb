@@ -81,7 +81,6 @@ fn attempt(root: &Path, config: &StoreConfig) -> Attempt {
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", config.branch);
     match run_git(
         root,
-        config,
         &["push", "--porcelain", "--", &config.remote, &refspec],
         PUSH_TIMEOUT,
     ) {
@@ -279,7 +278,6 @@ impl Store {
         }
         let known = run_git(
             &self.root,
-            &config,
             &["remote", "get-url", "--", &config.remote],
             PUSH_TIMEOUT,
         )
@@ -290,7 +288,6 @@ impl Store {
         let verb = if known.success { "set-url" } else { "add" };
         let outcome = run_git(
             &self.root,
-            &config,
             &["remote", verb, "--", &config.remote, url],
             PUSH_TIMEOUT,
         )

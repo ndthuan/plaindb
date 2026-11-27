@@ -43,6 +43,7 @@ pub const LAST_COMMIT_FILE: &str = "last-commit";
 pub const WARNINGS_FILE: &str = "warnings.json";
 pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
 pub const GIT_NOT_FOUND_WARNING: &str = "git_not_found";
+pub const GIT_BINARY_IGNORED_WARNING: &str = "git_binary_ignored";
 const GIT_DIR: &str = ".git";
 const FALLBACK_NAME: &str = "plaindb";
 const FALLBACK_EMAIL: &str = "plaindb@localhost";
@@ -492,7 +493,7 @@ impl Store {
 
 pub(crate) fn status_at(root: &Path) -> Result<GitStatus> {
     let config = read_config(root)?;
-    let binary = command::resolve(&config);
+    let binary = command::resolve(root);
     let found = command::is_available(&binary);
     let mut status = GitStatus {
         enabled: config.git,

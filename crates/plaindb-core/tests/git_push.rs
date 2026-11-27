@@ -386,11 +386,11 @@ fn the_push_names_the_remote_after_a_separator_and_sends_a_full_refspec() {
         StoreConfig {
             git: true,
             durability: Durability::Off,
-            git_binary: Some(recorder.to_str().unwrap().to_owned()),
             ..StoreConfig::default()
         },
     )
     .unwrap();
+    plaindb_core::set_git_program(&root, Some(recorder.to_str().unwrap().to_owned()));
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)

@@ -149,34 +149,187 @@ fn a_healthy_store_with_a_reachable_remote_has_no_problem() {
     assert_eq!(report.result["errors"], 0);
 }
 
+fn plaindb_in(store: &Path, cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_plaindb"));
+    command
+        .current_dir(cwd)
+        .arg("--store")
+        .arg(store)
+        .args(args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("the binary runs")
+}
+
+fn doctor_in(store: &Path, cwd: &Path, env: &[(&str, &str)], flags: &[&str]) -> Doctor {
+    let output = plaindb_in(store, cwd, env, &[&["--json", "doctor"], flags].concat());
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    assert_eq!(parsed["ok"], true, "{parsed}");
+    Doctor {
+        code: output.status.code(),
+        result: parsed["result"].clone(),
+    }
+}
+
+fn marking_program(path: &Path, marker: &Path) {
+    fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh runs")
+            .stdout,
+    )
+    .expect("utf-8")
+    .trim()
+    .to_owned();
+    fs::write(
+        path,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nexec {real} \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .expect("the program is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable");
+    }
+}
+
 #[test]
-fn a_missing_git_binary_with_push_on_is_an_error_that_names_the_setting() {
+fn a_missing_git_binary_with_push_on_is_an_error_that_names_the_variable() {
     let fixture = fixture("on-commit");
-    succeed(
+    let report = doctor_in(
         &fixture.store,
-        &["config", "set", "git_binary", "/path/to/missing/git"],
+        &fixture.store,
+        &[("PLAINDB_GIT", "/path/to/missing/git")],
+        &["--offline"],
     );
-    let report = doctor(&fixture.store, &["--offline"]);
     assert_eq!(report.code, Some(1));
     assert_eq!(report.status("git_binary"), "error");
     assert!(
         report.check("git_binary")["fix"]
             .as_str()
             .expect("a fix")
-            .contains("git_binary")
+            .contains("PLAINDB_GIT")
     );
 }
 
 #[test]
 fn a_missing_git_binary_with_push_off_is_a_warning() {
     let fixture = fixture("off");
-    succeed(
+    let report = doctor_in(
         &fixture.store,
-        &["config", "set", "git_binary", "/path/to/missing/git"],
+        &fixture.store,
+        &[("PLAINDB_GIT", "/path/to/missing/git")],
+        &["--offline"],
     );
-    let report = doctor(&fixture.store, &["--offline"]);
     assert_eq!(report.code, Some(0));
     assert_eq!(report.status("git_binary"), "warn");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_git_program_named_by_the_store_file_never_runs() {
+    let fixture = fixture("on-commit");
+    let marker = fixture._dir.path().join("marker");
+    marking_program(&fixture.store.join("app/bin/tool"), &marker);
+    let path = fixture.store.join("_store.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    config["git_binary"] = Value::String("app/bin/tool".to_owned());
+    fs::write(&path, serde_json::to_vec_pretty(&config).expect("json")).expect("write");
+    let here = Path::new(".");
+    let report = doctor_in(here, &fixture.store, &[], &["--offline"]);
+    assert_eq!(report.status("git_binary"), "warn");
+    assert_eq!(report.check("git_binary")["details"]["source"], "path");
+    assert!(
+        report.check("git_binary")["fix"]
+            .as_str()
+            .expect("a fix")
+            .contains("PLAINDB_GIT")
+    );
+    let status = plaindb_in(here, &fixture.store, &[], &["--json", "status"]);
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout).expect("JSON");
+    let codes: Vec<&Value> = status["result"]["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .map(|warning| &warning["code"])
+        .collect();
+    assert!(
+        codes.contains(&&Value::from("git_binary_ignored")),
+        "{status}"
+    );
+    let insert = plaindb_in(
+        here,
+        &fixture.store,
+        &[],
+        &[
+            "--json",
+            "insert",
+            "app",
+            "notes",
+            "b",
+            "--data",
+            r#"{"n":2}"#,
+        ],
+    );
+    assert_eq!(insert.status.code(), Some(0), "{insert:?}");
+    let push = plaindb_in(here, &fixture.store, &[], &["--json", "push"]);
+    assert_eq!(push.status.code(), Some(0), "{push:?}");
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_environment_chooses_the_git_program() {
+    let fixture = fixture("on-commit");
+    let marker = fixture._dir.path().join("marker");
+    let program = fixture._dir.path().join("wrappers/git");
+    marking_program(&program, &marker);
+    let chosen = program.to_str().expect("utf-8");
+    let report = doctor_in(
+        &fixture.store,
+        &fixture.store,
+        &[("PLAINDB_GIT", chosen)],
+        &["--offline"],
+    );
+    assert_eq!(report.status("git_binary"), "ok");
+    assert_eq!(report.check("git_binary")["details"]["source"], "env");
+    assert!(marker.exists());
+
+    let report = doctor_in(
+        &fixture.store,
+        &fixture.store,
+        &[("PLAINDB_GIT", "bin/git")],
+        &["--offline"],
+    );
+    assert_eq!(report.status("git_binary"), "error");
+    assert_eq!(
+        report.check("git_binary")["message"],
+        "PLAINDB_GIT must be an absolute path or a program name"
+    );
+    let push = plaindb_in(
+        &fixture.store,
+        &fixture.store,
+        &[("PLAINDB_GIT", "bin/git")],
+        &["--json", "push"],
+    );
+    assert_ne!(push.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&push.stdout).contains("git_not_found"));
+
+    let report = doctor_in(
+        &fixture.store,
+        &fixture.store,
+        &[("PLAINDB_GIT", "")],
+        &["--offline"],
+    );
+    assert_eq!(report.status("git_binary"), "ok");
+    assert_eq!(report.check("git_binary")["details"]["source"], "path");
 }
 
 #[test]

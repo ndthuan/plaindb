@@ -482,8 +482,7 @@ fn the_newer_settings_round_trip() {
         ("durability", "off", json!("off")),
         ("gc_every", "0", json!(0)),
         ("gc_every", "25", json!(25)),
-        ("git_binary", "/path/to/git", json!("/path/to/git")),
-        ("git_binary", "", Value::Null),
+        ("lock_timeout_ms", "250", json!(250)),
     ] {
         let set = succeed(dir.path(), "config", &["config", "set", key, value]);
         assert_eq!(set["value"], expected);
@@ -503,6 +502,7 @@ fn a_bad_setting_value_writes_nothing() {
         ("gc_every", "often"),
         ("gc_every", "-1"),
         ("push", "always"),
+        ("git_binary", "/usr/bin/git"),
     ] {
         assert_eq!(
             fail(dir.path(), &["config", "set", key, value]),
@@ -528,9 +528,10 @@ fn the_listing_marks_what_differs_from_the_default() {
         all["value"]["durability"],
         json!({"value": "full", "default": true})
     );
-    for key in ["git_binary", "limits.max_scan_ms", "branch", "remote"] {
+    for key in ["limits.max_scan_ms", "branch", "remote"] {
         assert!(all["value"].get(key).is_some(), "{key}");
     }
+    assert!(all["value"].get("git_binary").is_none());
 }
 
 #[test]

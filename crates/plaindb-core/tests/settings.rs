@@ -25,17 +25,13 @@ fn config_follows_every_setting_made_through_the_store() {
     let store = Store::init(temp.path()).unwrap();
     store.set_setting("durability", "normal").unwrap();
     store.set_setting("gc_every", "7").unwrap();
-    store.set_setting("git_binary", "/path/to/git").unwrap();
     store.set_setting("commit", "manual").unwrap();
     store.set_setting("push", "on-commit").unwrap();
     let config = store.config();
     assert_eq!(config.durability, Durability::Normal);
     assert_eq!(config.gc_every, 7);
-    assert_eq!(config.git_binary.as_deref(), Some("/path/to/git"));
     assert_eq!(config.commit, CommitMode::Manual);
     assert_eq!(config.push, PushMode::OnCommit);
-    store.set_setting("git_binary", "").unwrap();
-    assert_eq!(store.config().git_binary, None);
 }
 
 #[test]
@@ -106,7 +102,7 @@ fn a_setting_is_committed_when_git_is_on() {
     store.set_setting("gc_every", "11").unwrap();
     assert_eq!(subject(temp.path()), "meta store: set gc_every");
     store.set_setting("gc_every", "11").unwrap();
-    store.set_setting("git_binary", "").unwrap();
+    store.set_setting("durability", "full").unwrap();
     assert_eq!(subject(temp.path()), "meta store: set gc_every");
 }
 
@@ -181,4 +177,37 @@ fn plain_remote_and_branch_names_are_accepted() {
         Store::open(temp.path()).unwrap().config().branch,
         "backup/2026"
     );
+}
+
+#[test]
+fn git_binary_is_no_longer_a_setting() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    let error = store.set_setting("git_binary", "/usr/bin/git").unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(
+        error.message,
+        "git_binary is no longer a setting: set the PLAINDB_GIT environment variable"
+    );
+    assert_eq!(
+        store.config().setting("git_binary").unwrap_err().code,
+        ErrorCode::InvalidName
+    );
+}
+
+#[test]
+fn a_store_file_that_names_a_git_program_opens_and_loses_it_on_the_next_write() {
+    for stored in [Value::Null, json!("/path/to/git")] {
+        let temp = tempfile::tempdir().unwrap();
+        drop(Store::init(temp.path()).unwrap());
+        let path = temp.path().join("_store.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["git_binary"] = stored.clone();
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        store.set_setting("gc_every", "3").unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["gc_every"], 3, "{stored}");
+        assert!(written.get("git_binary").is_none(), "{stored}");
+    }
 }

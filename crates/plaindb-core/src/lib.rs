@@ -40,7 +40,7 @@ pub use git::{
     HistoryEntry, PushOutcome,
 };
 #[cfg(feature = "test-hooks")]
-pub use hooks::full_flush_count;
+pub use hooks::{full_flush_count, set_git_program};
 pub use jiff::Timestamp;
 pub use lock::WriteLock;
 pub use names::{new_id, validate_collection_name, validate_db_name, validate_id};

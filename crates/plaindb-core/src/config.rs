@@ -62,6 +62,7 @@ pub struct StoreConfig {
     pub durability: Durability,
     pub checkpoint_interval: u64,
     pub gc_every: u64,
+    #[serde(default, skip_serializing)]
     pub git_binary: Option<String>,
     pub limits: Limits,
 }
@@ -74,7 +75,6 @@ pub const SETTING_KEYS: &[&str] = &[
     "lock_timeout_ms",
     "durability",
     "gc_every",
-    "git_binary",
     "limits.max_document_bytes",
     "limits.max_results",
     "limits.max_scan_ms",
@@ -211,8 +211,11 @@ impl StoreConfig {
             "lock_timeout_ms" => self.lock_timeout_ms = parse_count(key, value)?,
             "gc_every" => self.gc_every = parse_count(key, value)?,
             "git_binary" => {
-                let path = value.trim();
-                self.git_binary = (!path.is_empty()).then(|| path.to_owned());
+                return Err(Error::new(
+                    ErrorCode::InvalidConfig,
+                    "git_binary is no longer a setting: set the PLAINDB_GIT environment variable",
+                )
+                .with_detail("key", key));
             }
             "limits.max_document_bytes" => {
                 self.limits.max_document_bytes = parse_limit(key, value)?;

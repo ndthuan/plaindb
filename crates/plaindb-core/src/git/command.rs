@@ -1,10 +1,10 @@
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::StoreConfig;
+use crate::hooks;
 
 pub const GIT_BINARY_ENV: &str = "PLAINDB_GIT";
 const FAILING_ASKPASS: &str = "false";
@@ -30,11 +30,11 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.trim().is_empty())
 }
 
-pub(crate) fn resolve(config: &StoreConfig) -> Binary {
-    if let Some(program) = non_empty(config.git_binary.clone()) {
+pub(crate) fn resolve(root: &Path) -> Binary {
+    if let Some(program) = hooks::git_program(root) {
         return Binary {
             program,
-            source: "config",
+            source: "env",
         };
     }
     if let Some(program) = non_empty(std::env::var(GIT_BINARY_ENV).ok()) {
@@ -49,11 +49,19 @@ pub(crate) fn resolve(config: &StoreConfig) -> Binary {
     }
 }
 
+pub(crate) fn is_allowed(binary: &Binary) -> bool {
+    let program = Path::new(&binary.program);
+    program.is_absolute() || program.components().count() == 1 && program.file_name().is_some()
+}
+
 fn is_file(path: &Path) -> bool {
     path.metadata().is_ok_and(|meta| meta.is_file())
 }
 
 pub(crate) fn is_available(binary: &Binary) -> bool {
+    if !is_allowed(binary) {
+        return false;
+    }
     let program = Path::new(&binary.program);
     if program.components().count() > 1 {
         return is_file(program);
@@ -84,8 +92,8 @@ fn drain(mut pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Str
     })
 }
 
-fn command(root: &Path, config: &StoreConfig, args: &[&str]) -> Command {
-    let mut command = Command::new(resolve(config).program);
+fn command(program: &str, root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
     command
         .arg("-C")
         .arg(root)
@@ -105,13 +113,12 @@ fn command(root: &Path, config: &StoreConfig, args: &[&str]) -> Command {
     command
 }
 
-pub(crate) fn run_git(
-    root: &Path,
-    config: &StoreConfig,
-    args: &[&str],
-    timeout: Duration,
-) -> std::io::Result<GitRun> {
-    let mut child = command(root, config, args).spawn()?;
+pub(crate) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<GitRun> {
+    let binary = resolve(root);
+    if !is_allowed(&binary) {
+        return Err(ErrorKind::NotFound.into());
+    }
+    let mut child = command(&binary.program, root, args).spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;

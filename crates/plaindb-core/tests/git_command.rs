@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use plaindb_core::{
     Doc, Durability, ErrorCode, Format, GIT_BINARY_ENV, Op, PushMode, PushOutcome, Store,
-    StoreConfig, Tx,
+    StoreConfig, Tx, set_git_program,
 };
 use serde_json::{Value, json};
 
@@ -81,11 +81,13 @@ fn store_pushing_to(root: &Path, url: &str, git_binary: Option<&Path>) -> Store 
         StoreConfig {
             git: true,
             durability: Durability::Off,
-            git_binary: git_binary.map(|path| path.to_str().unwrap().to_owned()),
             ..StoreConfig::default()
         },
     )
     .unwrap();
+    if let Some(path) = git_binary {
+        set_git_program(store.root(), Some(path.to_str().unwrap().to_owned()));
+    }
     store.create_db("main").unwrap();
     store
         .create_collection("main", "items", Format::Json)
@@ -231,7 +233,7 @@ fn a_missing_binary_warns_and_every_write_reports_it() {
     let root = dir.path().join("store");
     let store = store_pushing_to(&root, remote.to_str().unwrap(), None);
     assert!(store.status().unwrap().warnings.is_empty());
-    set_store_key(&root, "git_binary", json!("/nonexistent/path/to/git"));
+    set_git_program(&root, Some("/nonexistent/path/to/git".to_owned()));
     let result = store.apply(put("a", 1)).unwrap();
     assert_eq!(result.push, Some(PushOutcome::GitNotFound));
     assert_eq!(
@@ -244,9 +246,9 @@ fn a_missing_binary_warns_and_every_write_reports_it() {
         .iter()
         .find(|warning| warning.code == "git_not_found")
         .unwrap();
-    assert_eq!(warning.details["source"], "config");
+    assert_eq!(warning.details["source"], "env");
     assert!(!status.git.git_binary_found);
-    assert_eq!(status.git.git_binary_source, "config");
+    assert_eq!(status.git.git_binary_source, "env");
     assert_eq!(status.git.git_binary, "/nonexistent/path/to/git");
     assert_eq!(store.list_ids("main", "items").unwrap(), ["a"]);
 }
@@ -256,12 +258,12 @@ fn a_store_that_does_not_push_never_warns_about_a_missing_binary() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("store");
     let store = Store::init_with_git(&root).unwrap();
-    set_store_key(&root, "git_binary", json!("/nonexistent/path/to/git"));
+    set_git_program(&root, Some("/nonexistent/path/to/git".to_owned()));
     assert!(store.status().unwrap().warnings.is_empty());
 }
 
 #[test]
-fn the_binary_comes_from_the_config_then_the_environment_then_the_path() {
+fn the_binary_comes_from_the_environment_then_the_path_never_the_store_file() {
     let dir = tempfile::tempdir().unwrap();
     let remote = bare_remote(dir.path());
     let root = dir.path().join("store");
@@ -298,9 +300,17 @@ fn the_binary_comes_from_the_config_then_the_environment_then_the_path() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(config_marker.exists());
-    assert!(!env_marker.exists());
-    assert_eq!(store.status().unwrap().git.git_binary_source, "config");
+    assert!(env_marker.exists());
+    assert!(!config_marker.exists());
+    assert_eq!(store.status().unwrap().git.git_binary_source, "path");
+    let output = Command::new(WRITER)
+        .arg(&root)
+        .arg("push")
+        .env(GIT_BINARY_ENV, "  ")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!config_marker.exists());
 }
 
 #[test]
@@ -317,6 +327,34 @@ fn the_environment_names_a_binary_that_may_be_missing() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("git_not_found"));
+    assert_eq!(
+        store.status().unwrap().git.last_push_error.as_deref(),
+        Some("git_not_found")
+    );
+}
+
+#[test]
+fn an_environment_value_that_is_a_relative_path_is_a_missing_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path());
+    let root = dir.path().join("store");
+    let store = store_pushing_to(&root, remote.to_str().unwrap(), None);
+    let marker = dir.path().join("relative.marker");
+    script(
+        &dir.path().join("bin"),
+        "git",
+        &format!("touch {}\nexec {} \"$@\"", marker.display(), real_git()),
+    );
+    let output = Command::new(WRITER)
+        .arg(&root)
+        .arg("push")
+        .current_dir(dir.path())
+        .env(GIT_BINARY_ENV, "bin/git")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("git_not_found"));
+    assert!(!marker.exists());
     assert_eq!(
         store.status().unwrap().git.last_push_error.as_deref(),
         Some("git_not_found")

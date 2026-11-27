@@ -4,11 +4,13 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::json;
 
-use super::command::run_git;
+use super::command::{self, run_git};
 use super::{GIT_DIR, GitStatus, gc, read_warning, status_at};
 use crate::config::{PushMode, StoreConfig};
 use crate::doctor::{Check, DoctorOptions, Group};
 
+const FIX_MISSING_BINARY: &str =
+    "install git, or set the PLAINDB_GIT environment variable to the git program's path";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const STALE_LOCK: Duration = Duration::from_secs(600);
 const LOOSE_OBJECTS_WITHOUT_HOUSEKEEPING: u64 = 6_700;
@@ -33,7 +35,7 @@ pub(crate) fn checks(root: &Path, config: &StoreConfig, options: DoctorOptions) 
     };
     vec![
         binary_check(root, config, &status),
-        remote_check(root, config, &status, options),
+        remote_check(root, &status, options),
         unpushed_check(&status),
         remote_ahead_check(&status),
         last_push_check(&status),
@@ -48,6 +50,15 @@ fn binary_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> Check 
         "binary": status.git_binary,
         "source": status.git_binary_source,
     });
+    if !command::is_allowed(&command::resolve(root)) {
+        return Check::error(
+            Group::Git,
+            "git_binary",
+            "PLAINDB_GIT must be an absolute path or a program name",
+        )
+        .with_details(details)
+        .with_fix(FIX_MISSING_BINARY);
+    }
     if !status.git_binary_found {
         let message = format!(
             "the git binary {} chosen by {} was not found",
@@ -58,37 +69,34 @@ fn binary_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> Check 
         } else {
             Check::warn(Group::Git, "git_binary", message)
         };
-        return check
-            .with_details(details)
-            .with_fix("install git, or plaindb config set git_binary /path/to/git");
+        return check.with_details(details).with_fix(FIX_MISSING_BINARY);
     }
-    let version = run_git(root, config, &["--version"], PROBE_TIMEOUT)
+    let version = run_git(root, &["--version"], PROBE_TIMEOUT)
         .ok()
         .filter(|run| run.success)
         .map(|run| run.stdout.trim().to_owned());
-    Check::ok(
-        Group::Git,
-        "git_binary",
-        format!(
-            "{} ({}) chosen by {}",
-            version.as_deref().unwrap_or("git"),
-            status.git_binary,
-            status.git_binary_source
-        ),
-    )
-    .with_details(json!({
+    let message = format!(
+        "{} ({}) chosen by {}",
+        version.as_deref().unwrap_or("git"),
+        status.git_binary,
+        status.git_binary_source
+    );
+    let details = json!({
         "binary": status.git_binary,
         "source": status.git_binary_source,
         "version": version,
-    }))
+    });
+    if config.git_binary.is_some() {
+        return Check::warn(Group::Git, "git_binary", message)
+            .with_details(details)
+            .with_fix(
+                "remove git_binary from _store.json; set the PLAINDB_GIT environment variable to choose a git program",
+            );
+    }
+    Check::ok(Group::Git, "git_binary", message).with_details(details)
 }
 
-fn remote_check(
-    root: &Path,
-    config: &StoreConfig,
-    status: &GitStatus,
-    options: DoctorOptions,
-) -> Check {
+fn remote_check(root: &Path, status: &GitStatus, options: DoctorOptions) -> Check {
     let Some(url) = &status.remote_url else {
         if status.push == PushMode::OnCommit {
             return Check::error(
@@ -117,11 +125,10 @@ fn remote_check(
             "the remote cannot be checked without a git binary",
         )
         .with_details(details)
-        .with_fix("plaindb config set git_binary /path/to/git");
+        .with_fix(FIX_MISSING_BINARY);
     }
     match run_git(
         root,
-        config,
         &["ls-remote", "--heads", "--", &status.remote],
         PROBE_TIMEOUT,
     ) {

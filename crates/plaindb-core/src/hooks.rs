@@ -1,7 +1,29 @@
 #[cfg(feature = "test-hooks")]
 mod enabled {
     use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
+
+    static GIT_PROGRAMS: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
+    pub fn set_git_program(root: &Path, program: Option<String>) {
+        let mut programs = GIT_PROGRAMS.lock().unwrap_or_else(PoisonError::into_inner);
+        let programs = programs.get_or_insert_with(HashMap::new);
+        match program {
+            Some(program) => programs.insert(root.to_path_buf(), program),
+            None => programs.remove(root),
+        };
+    }
+
+    pub(crate) fn git_program(root: &Path) -> Option<String> {
+        GIT_PROGRAMS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|programs| programs.get(root).cloned())
+    }
 
     thread_local! {
         static FULL_FLUSHES: Cell<u64> = const { Cell::new(0) };
@@ -72,6 +94,10 @@ mod enabled {
 
 #[cfg(not(feature = "test-hooks"))]
 mod enabled {
+    pub(crate) fn git_program(_root: &std::path::Path) -> Option<String> {
+        None
+    }
+
     pub(crate) fn full_flush() {}
 
     pub(crate) fn before_journal() {}
@@ -91,9 +117,9 @@ mod enabled {
     pub(crate) fn after_git_commit() {}
 }
 
-#[cfg(feature = "test-hooks")]
-pub use enabled::full_flush_count;
 pub(crate) use enabled::{
     after_files, after_git_commit, after_journal, before_git_commit, before_journal, boot_id,
-    during_checkpoint, full_flush,
+    during_checkpoint, full_flush, git_program,
 };
+#[cfg(feature = "test-hooks")]
+pub use enabled::{full_flush_count, set_git_program};
