@@ -521,10 +521,7 @@ impl Store {
                 }),
             });
         }
-        if status.git.enabled
-            && status.git.push == crate::config::PushMode::OnCommit
-            && !status.git.git_binary_found
-        {
+        if status.git.enabled && status.git.push.is_on() && !status.git.git_binary_found {
             status.warnings.push(Warning {
                 code: git::GIT_NOT_FOUND_WARNING.to_owned(),
                 db: String::new(),

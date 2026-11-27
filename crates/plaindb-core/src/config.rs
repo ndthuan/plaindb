@@ -20,6 +20,21 @@ pub enum CommitMode {
 pub enum PushMode {
     Off,
     OnCommit,
+    Background,
+}
+
+impl PushMode {
+    pub fn is_on(self) -> bool {
+        self != Self::Off
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::OnCommit => "on-commit",
+            Self::Background => "background",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,7 +201,11 @@ impl StoreConfig {
                 self.push = parse_choice(
                     key,
                     value,
-                    &[("off", PushMode::Off), ("on-commit", PushMode::OnCommit)],
+                    &[
+                        ("off", PushMode::Off),
+                        ("on-commit", PushMode::OnCommit),
+                        ("background", PushMode::Background),
+                    ],
                 )?;
             }
             "durability" => {

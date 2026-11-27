@@ -24,6 +24,14 @@ To restore, run `git clone <remote> <directory>` and open that directory as a st
 
 Nothing is pulled or merged automatically.
 
+## Push modes
+
+The `"push"` setting takes one of three values, set with `plaindb config set push <mode>` or `plaindb init --push <mode>`:
+
+- `off`, the default: nothing is pushed until `plaindb push`.
+- `on-commit`: the write waits for its push, as described above, and its result names the outcome: `ok`, `failed`, `remote_ahead`, `deferred` or `git_not_found`.
+- `background`: the write returns as soon as it is committed and starts a detached `plaindb` process that pushes. Its result says `scheduled`, which means the push has started, not that it worked: this mode gives up the per-write confirmation of `on-commit`, and the outcome shows up later in the status (`last_push_at`, `last_push_error`, `unpushed`, `next_push_at`) and in `plaindb doctor`. Only one background push runs at a time; one that finds another running leaves the work to it, and the running one pushes again when new commits arrived while it pushed. It follows the same rules as the push after a write in `on-commit` mode: the branch check, one attempt of at most 10 seconds and the same wait after a failure. The status shows `push_running` while a push runs, and doctor's `git_push_stuck` warns about one that has run for 10 minutes or more. A program that uses the plaindb library directly, rather than the `plaindb` command, pushes in place in this mode, as with `on-commit`.
+
 ## Keeping the repository small
 
 Every `"gc_every"` commits (default 200, `0` turns it off, set with `plaindb config set gc_every`) the store runs `git gc --auto` in its directory. Git packs the loose objects only when it holds more than its own threshold, so most runs do nothing. The run happens after the write lock is released and after any push, so it never delays a write by another process or a backup. Only one run is active at a time; a run that finds another one busy, including a `git gc` started by a person, leaves it alone and is reported as busy. A `gc.pid` file in `.git` counts as a run started by a person: the automatic run does not start git and tries again after the next write.

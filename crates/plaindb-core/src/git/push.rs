@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::ErrorKind;
-use std::path::Path;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use crate::store::{STATE_DIR, Store, read_config};
 use crate::write::now_timestamp;
 
 const PUSH_LOCK_FILE: &str = "push.lock";
+pub const AFTER_WRITE_FLAG: &str = "--after-write";
 const PUSH_STATE_FILE: &str = "push.json";
 const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
 const WRITE_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +38,7 @@ pub enum PushOutcome {
     RemoteAhead,
     Deferred,
     GitNotFound,
+    Scheduled,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +219,106 @@ pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<File>> {
     }
 }
 
+pub(crate) struct PushLock(File);
+
+impl Drop for PushLock {
+    fn drop(&mut self) {
+        let _ = self.0.set_len(0);
+    }
+}
+
+fn take_push_lock(root: &Path) -> Result<Option<PushLock>> {
+    let Some(mut file) = try_lock_file(root, PUSH_LOCK_FILE)? else {
+        return Ok(None);
+    };
+    file.set_len(0)?;
+    writeln!(file, "{} {}", std::process::id(), now_timestamp())?;
+    Ok(Some(PushLock(file)))
+}
+
+pub(crate) struct RunningPush {
+    pub started_at: String,
+}
+
+#[cfg(unix)]
+fn is_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    let answer = unsafe { libc::kill(pid, 0) };
+    answer == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_alive(_pid: u32) -> bool {
+    true
+}
+
+pub(crate) fn running_push(root: &Path) -> Option<RunningPush> {
+    let text = fs::read_to_string(root.join(STATE_DIR).join(PUSH_LOCK_FILE)).ok()?;
+    let (pid, started_at) = text.trim().split_once(' ')?;
+    is_alive(pid.parse().ok()?).then(|| RunningPush {
+        started_at: started_at.to_owned(),
+    })
+}
+
+static PUSH_PROGRAM: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn set_push_program(program: Option<PathBuf>) {
+    *PUSH_PROGRAM.lock().unwrap_or_else(PoisonError::into_inner) = program;
+}
+
+#[cfg(unix)]
+fn push_program() -> Option<PathBuf> {
+    PUSH_PROGRAM
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+#[cfg(unix)]
+fn spawn_push(program: &Path, root: &Path) -> std::io::Result<()> {
+    let root = std::path::absolute(root)?;
+    super::command::spawn_detached(
+        program,
+        &[
+            "--store".as_ref(),
+            root.as_os_str(),
+            "push".as_ref(),
+            AFTER_WRITE_FLAG.as_ref(),
+        ],
+    )
+}
+
+fn schedule(root: &Path, config: &StoreConfig) -> Result<Option<PushOutcome>> {
+    #[cfg(unix)]
+    if let Some(program) = push_program() {
+        if !has_repository(root) || remote_url(root, &config.remote)?.is_none() {
+            return Ok(None);
+        }
+        return Ok(Some(match spawn_push(&program, root) {
+            Ok(()) => PushOutcome::Scheduled,
+            Err(source) => {
+                let mut state = read_state(root)?;
+                state.last_push_error = Some(truncated(&format!(
+                    "the background push did not start: {source}"
+                )));
+                write_state(root, &state)?;
+                PushOutcome::Failed
+            }
+        }));
+    }
+    push_after_write(root, config)
+}
+
+pub fn push_in_background(root: &Path) -> Result<()> {
+    let config = read_config(root)?;
+    if config.git {
+        push_after_write(root, &config)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn current_head(root: &Path) -> Result<Option<String>> {
     if !has_repository(root) {
         return Ok(None);
@@ -246,7 +349,7 @@ fn run(root: &Path, config: &StoreConfig) -> Result<PushOutcome> {
     check_head_branch(root, config)?;
     let mut pushed_any = false;
     loop {
-        let Some(lock) = try_lock_file(root, PUSH_LOCK_FILE)? else {
+        let Some(lock) = take_push_lock(root)? else {
             return Ok(if pushed_any {
                 PushOutcome::Ok
             } else {
@@ -371,7 +474,7 @@ pub(crate) fn push_after_write(root: &Path, config: &StoreConfig) -> Result<Opti
     }
     let mut pushed_any = false;
     loop {
-        let Some(lock) = try_lock_file(root, PUSH_LOCK_FILE)? else {
+        let Some(lock) = take_push_lock(root)? else {
             return Ok(Some(if pushed_any {
                 PushOutcome::Ok
             } else {
@@ -399,7 +502,7 @@ pub(crate) fn push_after_write(root: &Path, config: &StoreConfig) -> Result<Opti
 impl Store {
     pub(crate) fn push_head(&self) -> Option<String> {
         let config = read_config(&self.root).ok()?;
-        if !config.git || config.push != PushMode::OnCommit {
+        if !config.git || !config.push.is_on() {
             return None;
         }
         current_head(&self.root).ok().flatten()
@@ -407,14 +510,19 @@ impl Store {
 
     pub(crate) fn push_after(&self, before: Option<String>) -> Option<PushOutcome> {
         let config = read_config(&self.root).ok()?;
-        if !config.git || config.push != PushMode::OnCommit {
+        if !config.git || !config.push.is_on() {
             return None;
         }
         let after = current_head(&self.root).ok().flatten()?;
         if before.as_deref() == Some(after.as_str()) {
             return None;
         }
-        push_after_write(&self.root, &config).unwrap_or(Some(PushOutcome::Failed))
+        let pushed = if config.push == PushMode::Background {
+            schedule(&self.root, &config)
+        } else {
+            push_after_write(&self.root, &config)
+        };
+        pushed.unwrap_or(Some(PushOutcome::Failed))
     }
 
     pub(crate) fn push_guard(&self) -> PushGuard<'_> {
@@ -467,13 +575,7 @@ impl Store {
     }
 
     pub fn set_push(&self, mode: PushMode) -> Result<()> {
-        self.set_setting(
-            "push",
-            match mode {
-                PushMode::Off => "off",
-                PushMode::OnCommit => "on-commit",
-            },
-        )
+        self.set_setting("push", mode.as_str())
     }
 }
 

@@ -366,6 +366,7 @@ impl From<PushInput> for PushArgs {
     fn from(_: PushInput) -> Self {
         Self {
             reset_remote_ahead: false,
+            after_write: false,
         }
     }
 }

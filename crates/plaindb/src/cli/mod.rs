@@ -231,6 +231,10 @@ fn run(context: &Context, command: Command) -> Result<Output> {
             git::set_remote(&context.open()?, &args)
         }
         Command::Commit(args) => git::commit(context, &args),
+        Command::Push(args) if args.after_write => {
+            plaindb_core::push_in_background(&context.store)?;
+            Ok(Output::streamed())
+        }
         Command::Push(args) => git::push(&context.open()?, &args),
         Command::Import(args) => transfer::import(context, &args),
         Command::Export(args) => transfer::export(context, &args),

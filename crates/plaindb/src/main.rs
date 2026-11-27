@@ -19,5 +19,6 @@ fn init_logging() {
 fn main() -> ExitCode {
     let parsed = cli::Cli::parse();
     init_logging();
+    plaindb_core::set_push_program(std::env::current_exe().ok());
     cli::execute(parsed)
 }

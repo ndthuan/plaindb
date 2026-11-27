@@ -36,8 +36,8 @@ pub use config::{
 pub use doctor::{Check, CheckStatus, DoctorOptions, Group, Report};
 pub use error::{Error, ErrorCode, Result};
 pub use git::{
-    At, CommitId, DEFAULT_HISTORY_LIMIT, GIT_BINARY_ENV, GcOutcome, GcReport, GitStatus,
-    HistoryEntry, PushOutcome,
+    AFTER_WRITE_FLAG, At, CommitId, DEFAULT_HISTORY_LIMIT, GIT_BINARY_ENV, GcOutcome, GcReport,
+    GitStatus, HistoryEntry, PushOutcome, push_in_background, set_push_program,
 };
 #[cfg(feature = "test-hooks")]
 pub use hooks::{full_flush_count, set_git_program};

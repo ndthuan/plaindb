@@ -44,13 +44,15 @@
         "head": { "type": ["string", "null"] },
         "pending_txs": { "type": "integer", "minimum": 0 },
         "pending_paths": { "type": "integer", "minimum": 0 },
-        "push": { "enum": ["off", "on-commit"] },
+        "push": { "enum": ["off", "on-commit", "background"] },
         "remote": { "type": "string" },
         "remote_url": { "type": ["string", "null"] },
         "unpushed": { "type": "integer", "minimum": 0 },
         "last_push_at": { "type": ["string", "null"] },
         "last_push_error": { "type": ["string", "null"] },
         "remote_ahead": { "type": "boolean" },
+        "push_running": { "type": "boolean" },
+        "next_push_at": { "type": ["string", "null"] },
         "git_bytes": { "type": "integer", "minimum": 0 }
       },
       "required": [
@@ -67,6 +69,8 @@
         "last_push_at",
         "last_push_error",
         "remote_ahead",
+        "push_running",
+        "next_push_at",
         "git_bytes"
       ],
       "additionalProperties": false

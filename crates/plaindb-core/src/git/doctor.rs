@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::command::{self, run_git};
 use super::{GIT_DIR, GitStatus, gc, missing, read_warning, status_at};
-use crate::config::{PushMode, StoreConfig};
+use crate::config::StoreConfig;
 use crate::doctor::{Check, DoctorOptions, Group};
 
 const FIX_MISSING_BINARY: &str =
@@ -42,6 +42,7 @@ pub(crate) fn checks(root: &Path, config: &StoreConfig, options: DoctorOptions) 
         unpushed_check(&status),
         remote_ahead_check(&status),
         last_push_check(&status),
+        push_stuck_check(root),
         lock_files_check(root),
         missing_commits_check(root),
         worktree_check(root),
@@ -69,7 +70,7 @@ fn binary_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> Check 
             "the git binary {} chosen by {} was not found",
             status.git_binary, status.git_binary_source
         );
-        let check = if status.push == PushMode::OnCommit {
+        let check = if status.push.is_on() {
             Check::error(Group::Git, "git_binary", message)
         } else {
             Check::warn(Group::Git, "git_binary", message)
@@ -103,7 +104,7 @@ fn binary_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> Check 
 
 fn remote_check(root: &Path, status: &GitStatus, options: DoctorOptions) -> Check {
     let Some(url) = &status.remote_url else {
-        if status.push == PushMode::OnCommit {
+        if status.push.is_on() {
             return Check::error(
                 Group::Git,
                 "git_remote",
@@ -195,7 +196,7 @@ fn redacted(root: &Path, status: &GitStatus, text: &str) -> String {
 
 fn unreachable_remote(status: &GitStatus, reason: &str, details: serde_json::Value) -> Check {
     let message = format!("the remote cannot be reached: {reason}");
-    let check = if status.push == PushMode::OnCommit {
+    let check = if status.push.is_on() {
         Check::error(Group::Git, "git_remote", message)
     } else {
         Check::warn(Group::Git, "git_remote", message)
@@ -247,6 +248,33 @@ fn last_push_check(status: &GitStatus) -> Check {
         None => Check::ok(Group::Git, "git_last_push", "the last push did not fail")
             .with_details(json!({ "error": null, "at": status.last_push_at })),
     }
+}
+
+fn push_stuck_check(root: &Path) -> Check {
+    let Some(running) = super::push::running_push(root) else {
+        return Check::ok(Group::Git, "git_push_stuck", "no push is running")
+            .with_details(json!({ "running": false, "started_at": null }));
+    };
+    let details = json!({ "running": true, "started_at": running.started_at });
+    let age = running
+        .started_at
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .and_then(|at| jiff::Timestamp::now().duration_since(at).try_into().ok())
+        .unwrap_or(Duration::ZERO);
+    if age >= STALE_LOCK {
+        return Check::warn(
+            Group::Git,
+            "git_push_stuck",
+            format!("a push has been running for {} minutes", age.as_secs() / 60),
+        )
+        .with_details(details)
+        .with_fix(format!(
+            "stop the process that holds {}, then run plaindb push",
+            shell_quote(&root.join(crate::store::STATE_DIR).join("push.lock"))
+        ));
+    }
+    Check::ok(Group::Git, "git_push_stuck", "a push is running").with_details(details)
 }
 
 fn collect_locks(dir: &Path, found: &mut Vec<PathBuf>) {

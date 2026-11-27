@@ -262,6 +262,8 @@ pub fn status(store: &Store) -> Result<Output> {
             "last_push_at": git.last_push_at,
             "last_push_error": git.last_push_error,
             "remote_ahead": git.remote_ahead,
+            "push_running": git.push_running,
+            "next_push_at": git.next_push_at,
             "git_bytes": git.git_bytes,
         },
     });

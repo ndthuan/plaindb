@@ -234,6 +234,22 @@ pub(crate) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io:
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn spawn_detached(program: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<()> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    own_group(&mut command);
+    let mut child = command.spawn()?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 pub(crate) fn rejected_as_behind(porcelain: &str) -> bool {
     porcelain.lines().any(|line| {
         let mut fields = line.splitn(3, '\t');

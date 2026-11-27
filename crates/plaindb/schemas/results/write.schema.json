@@ -17,7 +17,7 @@
         "additionalProperties": false
       }
     },
-    "push": { "enum": ["ok", "failed", "remote_ahead", "deferred"] },
+    "push": { "enum": ["ok", "failed", "remote_ahead", "deferred", "git_not_found", "scheduled"] },
     "deferred": {
       "type": "object",
       "properties": {

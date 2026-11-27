@@ -3,7 +3,7 @@
   "title": "push",
   "type": "object",
   "properties": {
-    "outcome": { "enum": ["ok", "failed", "remote_ahead", "deferred"] }
+    "outcome": { "enum": ["ok", "failed", "remote_ahead", "deferred", "git_not_found", "scheduled"] }
   },
   "required": ["outcome"],
   "additionalProperties": false

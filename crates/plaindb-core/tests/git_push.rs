@@ -735,3 +735,61 @@ fn a_store_without_a_remote_url_starts_no_push_after_a_write() {
     assert_eq!(pushed(&store, "a", 1).push, None);
     assert_eq!(push_calls(&calls), 0);
 }
+
+#[test]
+fn the_background_push_delivers_the_newest_head_and_leaves_a_held_lock_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    store.set_push(PushMode::Off).unwrap();
+    pushed(&store, "a", 1);
+    pushed(&store, "b", 2);
+    let held = File::options()
+        .write(true)
+        .open(root.join(".plaindb/push.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    plaindb_core::push_in_background(&root).unwrap();
+    assert!(store.status().unwrap().git.unpushed > 0);
+    held.unlock().unwrap();
+    plaindb_core::push_in_background(&root).unwrap();
+    assert_eq!(store.status().unwrap().git.unpushed, 0);
+    assert_eq!(
+        git(&remote, &["rev-parse", "main"]),
+        git(&root, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn a_library_without_a_push_program_pushes_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let store = pushing_store(&dir.path().join("store"), &remote);
+    store.set_push(PushMode::Background).unwrap();
+    assert_eq!(store.config().push, PushMode::Background);
+    assert_eq!(pushed(&store, "a", 1).push, Some(PushOutcome::Ok));
+    assert_eq!(store.status().unwrap().git.unpushed, 0);
+}
+
+#[test]
+fn a_push_that_runs_too_long_is_reported_as_stuck() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    assert!(!store.status().unwrap().git.push_running);
+    assert_eq!(
+        doctor_check(&root, "git_push_stuck").status,
+        plaindb_core::doctor::CheckStatus::Ok
+    );
+    fs::write(
+        root.join(".plaindb/push.lock"),
+        format!("{} 2000-01-01T00:00:00.000Z\n", std::process::id()),
+    )
+    .unwrap();
+    assert!(store.status().unwrap().git.push_running);
+    let check = doctor_check(&root, "git_push_stuck");
+    assert_eq!(check.status, plaindb_core::doctor::CheckStatus::Warn);
+    assert_eq!(check.details["running"], true);
+}

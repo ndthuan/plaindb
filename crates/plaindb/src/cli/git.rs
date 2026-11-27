@@ -20,6 +20,8 @@ pub struct CommitArgs {
 pub struct PushArgs {
     #[arg(long, help = "Clear the remote_ahead flag before pushing")]
     pub reset_remote_ahead: bool,
+    #[arg(long, hide = true)]
+    pub after_write: bool,
 }
 
 pub fn enable(store: &Store) -> Result<Output> {

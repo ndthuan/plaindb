@@ -32,7 +32,7 @@ pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
 pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
 pub use missing::{GIT_COMMIT_PENDING_WARNING, MISSING_COMMITS_FILE, MissingCommits};
 pub use pending::PendingTx;
-pub use push::PushOutcome;
+pub use push::{AFTER_WRITE_FLAG, PushOutcome, push_in_background, set_push_program};
 
 pub(crate) use commit::commit_journal;
 pub(crate) use doctor::checks as doctor_checks;
@@ -76,6 +76,8 @@ pub struct GitStatus {
     pub last_push_at: Option<String>,
     pub last_push_error: Option<String>,
     pub remote_ahead: bool,
+    pub push_running: bool,
+    pub next_push_at: Option<String>,
     pub git_bytes: u64,
     pub last_gc_at: Option<String>,
     pub last_gc_outcome: Option<String>,
@@ -597,6 +599,8 @@ pub(crate) fn status_at(root: &Path) -> Result<GitStatus> {
         last_push_at: None,
         last_push_error: None,
         remote_ahead: false,
+        push_running: false,
+        next_push_at: None,
         git_bytes: 0,
         last_gc_at: None,
         last_gc_outcome: None,
@@ -621,6 +625,8 @@ pub(crate) fn status_at(root: &Path) -> Result<GitStatus> {
         .map(|text| push::without_credentials(&text, remote_url.as_deref()));
     status.remote_url = remote_url.as_deref().map(push::display_url);
     status.remote_ahead = state.remote_ahead;
+    status.push_running = push::running_push(root).is_some();
+    status.next_push_at = state.next_attempt_at;
     let gc_state = gc::read_state(root)?;
     status.last_gc_at = gc_state.last_gc_at;
     status.last_gc_outcome = gc_state.last_gc_outcome;

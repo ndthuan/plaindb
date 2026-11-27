@@ -893,3 +893,235 @@ fn a_nested_store_without_its_repository_never_writes_to_the_outer_one() {
     assert_eq!(fingerprint(), before);
     assert!(!store.join(".git").exists());
 }
+
+struct Pushing {
+    _dir: TempDir,
+    store: PathBuf,
+    remote: PathBuf,
+    calls: PathBuf,
+    slow_git: PathBuf,
+}
+
+fn run_with(store: &Path, env: &[(&str, &Path)], args: &[&str]) -> (i32, Value) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_plaindb"));
+    command.arg("--store").arg(store).arg("--json").args(args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("the binary runs");
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    assert_valid(&validator("response.schema.json"), &parsed);
+    (output.status.code().expect("an exit code"), parsed)
+}
+
+#[cfg(unix)]
+fn slow_git(dir: &Path, calls: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh runs")
+            .stdout,
+    )
+    .expect("text")
+    .trim()
+    .to_owned();
+    let path = dir.join("slow-git");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n*\" push \"*) echo push >> {}; sleep 5;;\nesac\nexec {real} \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .expect("the script is written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+    path
+}
+
+#[cfg(unix)]
+fn pushing(mode: &str) -> Pushing {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let remote = dir.path().join("remote.git");
+    git(
+        dir.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            "remote.git",
+        ],
+    );
+    let store = dir.path().join("store");
+    let url = remote.display().to_string();
+    succeed(
+        &store,
+        "init",
+        &["init", "--git", "--remote", &url, "--push", "off"],
+    );
+    succeed(&store, "db_ack", &["db", "create", "app"]);
+    succeed(
+        &store,
+        "collection_ack",
+        &["collection", "create", "app", "notes", "--format", "json"],
+    );
+    succeed(&store, "push", &["push"]);
+    succeed(&store, "config", &["config", "set", "push", mode]);
+    settle(&store);
+    let calls = dir.path().join("calls");
+    let slow_git = slow_git(dir.path(), &calls);
+    Pushing {
+        _dir: dir,
+        store,
+        remote,
+        calls,
+        slow_git,
+    }
+}
+
+fn status_git(store: &Path) -> Value {
+    succeed(store, "status", &["status"])["git"].clone()
+}
+
+fn settle(store: &Path) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let git = status_git(store);
+        if git["push_running"] == false {
+            return git;
+        }
+        assert!(std::time::Instant::now() < deadline, "the push never ended");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn push_count(calls: &Path) -> usize {
+    fs::read_to_string(calls)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+fn insert_with(fixture: &Pushing, id: &str) -> Value {
+    let (code, parsed) = run_with(
+        &fixture.store,
+        &[("PLAINDB_GIT", &fixture.slow_git)],
+        &["insert", "app", "notes", id, "--data", r#"{"n":1}"#],
+    );
+    assert_eq!(code, 0, "{parsed}");
+    assert_valid(&validator("results/write.schema.json"), &parsed["result"]);
+    parsed["result"].clone()
+}
+
+fn wait_for_push_state(store: &Path, done: impl Fn(&Value) -> bool) -> Value {
+    let path = store.join(".plaindb/push.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Ok(bytes) = fs::read(&path)
+            && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
+            && done(&state)
+        {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the push state never changed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_background_push_lets_writes_return_before_it() {
+    let fixture = pushing("background");
+    let begun = std::time::Instant::now();
+    for n in 0..10 {
+        let result = insert_with(&fixture, &format!("d{n}"));
+        assert_eq!(result["push"], "scheduled", "{result}");
+    }
+    assert!(
+        begun.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        begun.elapsed()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let git = settle(&fixture.store);
+    assert!(
+        push_count(&fixture.calls) <= 2,
+        "{}",
+        push_count(&fixture.calls)
+    );
+    assert_eq!(git["unpushed"], 0, "{git}");
+    assert_eq!(
+        crate::git(&fixture.remote, &["rev-parse", "main"]),
+        crate::git(&fixture.store, &["rev-parse", "HEAD"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_on_commit_push_still_holds_the_write() {
+    let fixture = pushing("on-commit");
+    let begun = std::time::Instant::now();
+    let result = insert_with(&fixture, "a");
+    assert!(begun.elapsed() >= std::time::Duration::from_secs(5));
+    assert_eq!(result["push"], "ok", "{result}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_background_push_to_a_missing_remote_backs_off_and_catches_up() {
+    let fixture = pushing("background");
+    let moved = fixture.remote.with_extension("moved");
+    fs::rename(&fixture.remote, &moved).expect("the remote moves");
+    let begun = std::time::Instant::now();
+    for n in 0..5 {
+        assert_eq!(insert_with(&fixture, &format!("d{n}"))["push"], "scheduled");
+    }
+    assert!(begun.elapsed() < std::time::Duration::from_secs(3));
+    let state = wait_for_push_state(&fixture.store, |state| state["failures"] != 0);
+    assert!(state["next_attempt_at"].is_string(), "{state}");
+    settle(&fixture.store);
+    fs::rename(&moved, &fixture.remote).expect("the remote is back");
+    succeed(&fixture.store, "push", &["push"]);
+    assert_eq!(status_git(&fixture.store)["unpushed"], 0);
+    assert_eq!(
+        crate::git(&fixture.remote, &["rev-parse", "main"]),
+        crate::git(&fixture.store, &["rev-parse", "HEAD"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_background_push_from_another_branch_sends_nothing() {
+    let fixture = pushing("background");
+    let delivered = crate::git(&fixture.remote, &["rev-parse", "main"]);
+    crate::git(&fixture.store, &["checkout", "-q", "-b", "other"]);
+    assert_eq!(insert_with(&fixture, "a")["push"], "scheduled");
+    wait_for_push_state(&fixture.store, |state| {
+        state["last_push_error"] == "HEAD is on other, the store pushes main"
+    });
+    settle(&fixture.store);
+    assert_eq!(push_count(&fixture.calls), 0);
+    assert_eq!(
+        crate::git(&fixture.remote, &["rev-parse", "main"]),
+        delivered
+    );
+}
+
+#[test]
+fn an_unknown_push_mode_is_refused() {
+    let dir = store_with_collection("json");
+    assert_eq!(
+        fail(dir.path(), &["config", "set", "push", "sometimes"]),
+        "invalid_config"
+    );
+    succeed(
+        dir.path(),
+        "config",
+        &["config", "set", "push", "background"],
+    );
+}

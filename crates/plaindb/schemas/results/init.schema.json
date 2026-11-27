@@ -5,7 +5,7 @@
   "properties": {
     "git": { "type": "boolean" },
     "commit": { "enum": ["each", "manual"] },
-    "push": { "enum": ["off", "on-commit"] },
+    "push": { "enum": ["off", "on-commit", "background"] },
     "remote": { "type": ["string", "null"] }
   },
   "required": ["git", "commit", "push", "remote"],

@@ -17,6 +17,7 @@ pub enum PushArg {
     Off,
     #[value(name = "on-commit")]
     OnCommit,
+    Background,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -133,6 +134,7 @@ pub fn init(context: &Context, args: &InitArgs) -> Result<Output> {
         },
         push: match args.push {
             Some(PushArg::OnCommit) => PushMode::OnCommit,
+            Some(PushArg::Background) => PushMode::Background,
             Some(PushArg::Off) | None => defaults.push,
         },
         ..defaults
