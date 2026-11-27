@@ -585,25 +585,30 @@ fn a_scan_over_the_time_limit_fails_but_an_indexed_lookup_does_not() {
         store
             .set_indexes("main", "items", vec![plain("size")])
             .unwrap();
-        store
-            .apply(Tx::new(vec![insert(
-                "items",
-                "a",
-                json!({ "size": 1, "other": 1 }),
-            )]))
-            .unwrap();
+        let ops = (0..300)
+            .map(|n| {
+                let size = if n == 0 { 1 } else { 2 };
+                insert(
+                    "items",
+                    &format!("d{n:03}"),
+                    json!({ "size": size, "other": n }),
+                )
+            })
+            .collect();
+        store.apply(Tx::new(ops)).unwrap();
     }
     let path = dir.path().join("_store.json");
     let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    config["limits"] = json!({ "max_scan_ms": 0 });
+    config["limits"] = json!({ "max_scan_ms": 1 });
     fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert_eq!(ids(&store, "items", &json!({ "size": 1 })), ["a"]);
+    assert_eq!(ids(&store, "items", &json!({ "size": 1 })), ["d000"]);
+    let slow: Vec<i64> = (1_000..60_000).collect();
     let error = store
         .find(Query {
             db: "main".to_owned(),
             coll: "items".to_owned(),
-            filter: json!({ "other": 1 }),
+            filter: json!({ "other": { "$in": slow } }),
             ..Query::default()
         })
         .unwrap_err();

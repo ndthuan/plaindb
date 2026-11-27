@@ -22,7 +22,7 @@ use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 
 pub const CACHE_FILE: &str = "index-cache.bin";
 const CACHE_FORMAT: u32 = 2;
-pub const DECODER_REVISION: u32 = 5;
+pub const DECODER_REVISION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct Header {

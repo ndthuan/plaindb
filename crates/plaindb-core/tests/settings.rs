@@ -247,3 +247,32 @@ fn an_unknown_key_in_the_store_file_is_warned_about_and_kept() {
     assert_eq!(rewritten["durabilty"], json!("off"));
     assert_eq!(rewritten["gc_every"], json!(100));
 }
+
+#[test]
+fn a_zero_result_or_scan_limit_is_refused() {
+    for key in ["limits.max_results", "limits.max_scan_ms"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::init(temp.path()).unwrap();
+        let error = store.set_setting(key, "0").unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{key}");
+        assert_eq!(error.details["key"], key);
+        assert!(
+            error
+                .message
+                .contains("a whole number above 0, or empty for no limit"),
+            "{}",
+            error.message
+        );
+        store.set_setting(key, "5").unwrap();
+        store.set_setting(key, "").unwrap();
+        drop(store);
+        let path = temp.path().join("_store.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let field = key.trim_start_matches("limits.");
+        config["limits"][field] = json!(0);
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let error = Store::open(temp.path()).err().unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{key}");
+        assert_eq!(error.details["key"], key);
+    }
+}

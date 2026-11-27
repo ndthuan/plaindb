@@ -183,8 +183,9 @@ impl Store {
             ),
             None => None,
         };
+        let query_hash = cursor::query_hash(&query.filter, &query.sort);
         let after = match &query.cursor {
-            Some(text) => Some(cursor::decode(text, sort.len() + 1)?),
+            Some(text) => Some(cursor::decode(text, sort.len() + 1, &query_hash)?),
             None => None,
         };
         if query.limit == Some(0) {
@@ -214,7 +215,7 @@ impl Store {
             let more = keyed.len() > limit;
             keyed.truncate(limit);
             let next_cursor = match keyed.last() {
-                Some((keys, _)) if more => Some(cursor::encode(keys)),
+                Some((keys, _)) if more => Some(cursor::encode(keys, &query_hash)),
                 _ => None,
             };
             let docs = keyed

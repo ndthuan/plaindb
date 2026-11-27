@@ -528,3 +528,65 @@ fn floats_and_integers_order_exactly() {
     );
     assert_eq!(sorted_ids(&store, "n"), ["v2", "v1", "v0", "v4", "v3"]);
 }
+
+fn first_page_cursor(store: &Store, filter: Value, sort: &str) -> String {
+    store
+        .find(Query {
+            sort: vec![(sort.to_owned(), Dir::Asc)],
+            limit: Some(10),
+            ..query(filter)
+        })
+        .unwrap()
+        .next_cursor
+        .expect("a second page")
+}
+
+fn cursor_reason(store: &Store, filter: Value, sort: &str, cursor: &str) -> Value {
+    let error = store
+        .find(Query {
+            sort: vec![(sort.to_owned(), Dir::Asc)],
+            limit: Some(10),
+            cursor: Some(cursor.to_owned()),
+            ..query(filter)
+        })
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidQuery);
+    error.details["reason"].clone()
+}
+
+#[test]
+fn a_cursor_only_fits_the_query_it_was_made_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = fixture(dir.path());
+    let cursor = first_page_cursor(&store, json!({"tags": "even"}), "n");
+    assert_eq!(
+        cursor_reason(&store, json!({"tags": "even"}), "score", &cursor),
+        "cursor_mismatch"
+    );
+    assert_eq!(
+        cursor_reason(&store, json!({"tags": "odd"}), "n", &cursor),
+        "cursor_mismatch"
+    );
+    let page = store
+        .find(Query {
+            sort: vec![("n".to_owned(), Dir::Asc)],
+            limit: Some(10),
+            cursor: Some(cursor),
+            ..query(json!({"tags": "even"}))
+        })
+        .unwrap();
+    assert_eq!(page.docs.len(), 10);
+}
+
+#[test]
+fn an_old_or_broken_cursor_is_a_bad_cursor() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let store = fixture(dir.path());
+    let old = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("[3,\"d003\"]");
+    assert_eq!(cursor_reason(&store, Value::Null, "n", &old), "bad_cursor");
+    assert_eq!(
+        cursor_reason(&store, Value::Null, "n", "not a cursor"),
+        "bad_cursor"
+    );
+}

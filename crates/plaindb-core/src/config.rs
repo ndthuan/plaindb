@@ -181,6 +181,29 @@ fn parse_limit(key: &str, value: &str) -> Result<Option<u64>> {
     }
 }
 
+const POSITIVE_LIMIT_EXPECTED: &str = "a whole number above 0, or empty for no limit";
+
+fn parse_positive_limit(key: &str, value: &str) -> Result<Option<u64>> {
+    match parse_limit(key, value)? {
+        Some(0) => Err(invalid_value(key, POSITIVE_LIMIT_EXPECTED)),
+        limit => Ok(limit),
+    }
+}
+
+impl Limits {
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (key, limit) in [
+            ("limits.max_results", self.max_results),
+            ("limits.max_scan_ms", self.max_scan_ms),
+        ] {
+            if limit == Some(0) {
+                return Err(invalid_value(key, POSITIVE_LIMIT_EXPECTED));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn parse_choice<T: Copy>(key: &str, value: &str, choices: &[(&str, T)]) -> Result<T> {
     choices
         .iter()
@@ -251,8 +274,8 @@ impl StoreConfig {
             "limits.max_document_bytes" => {
                 self.limits.max_document_bytes = parse_limit(key, value)?;
             }
-            "limits.max_results" => self.limits.max_results = parse_limit(key, value)?,
-            "limits.max_scan_ms" => self.limits.max_scan_ms = parse_limit(key, value)?,
+            "limits.max_results" => self.limits.max_results = parse_positive_limit(key, value)?,
+            "limits.max_scan_ms" => self.limits.max_scan_ms = parse_positive_limit(key, value)?,
             _ => return Err(unknown_setting(key)),
         }
         Ok(())

@@ -24,6 +24,9 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - A file that cannot be read no longer makes every command fail: it is an invalid file with the reason `unreadable`. A file over `limits.max_document_bytes`, or 64 MiB with no limit, is not read and is invalid with the reason `too_large`. Symlinks, names that are not UTF-8 and files with another document extension are counted in the status warning `skipped_files` and the doctor check `store_skipped_files`.
 - Documents that share a value under a unique index, for example after a file was copied by hand, are shown by the status warning `unique_duplicates` and the doctor error `store_unique_duplicates`.
 - A file modified within 2 seconds of being read is read and hashed again on the next scan, so a same-size edit within one timestamp tick is no longer missed.
+- A cursor is tied to the filter and sort it was made for; using it with another fails with `invalid_query` and the reason `cursor_mismatch`. Cursors from earlier versions are refused with `bad_cursor`.
+- Text search normalises words to NFC, so composed and decomposed Unicode find each other, and searching all fields reaches strings inside nested objects.
+- `limits.max_results` and `limits.max_scan_ms` refuse `0` in `config set` and in `_store.json`.
 
 ## [0.1.0] - 2026-11-26
 

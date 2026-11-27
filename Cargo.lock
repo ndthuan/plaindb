@@ -2218,6 +2218,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "ulid",
+ "unicode-normalization",
  "unicode-segmentation",
 ]
 

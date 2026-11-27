@@ -133,6 +133,7 @@ pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     }
     validate_remote_name(&config.remote)?;
     validate_branch_name(&config.branch)?;
+    config.limits.validate()?;
     Ok(config)
 }
 

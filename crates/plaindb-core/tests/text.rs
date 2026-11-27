@@ -247,3 +247,46 @@ fn json_and_yaml_collections_need_a_declared_text_index() {
         assert_eq!(error.code, ErrorCode::InvalidQuery);
     }
 }
+
+#[test]
+fn composed_and_decomposed_text_find_each_other() {
+    let composed = "Ti\u{1ebf}ng Vi\u{1ec7}t";
+    let decomposed = "Tie\u{302}\u{301}ng Vie\u{323}\u{302}t";
+    assert_ne!(composed, decomposed);
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), "notes", Format::Json);
+    store
+        .set_indexes("main", "notes", vec![text_index(&["title"])])
+        .unwrap();
+    store
+        .apply(Tx::new(vec![
+            insert("notes", "nfd", json!({"title": decomposed})),
+            insert("notes", "nfc", json!({"title": format!("{composed} two")})),
+        ]))
+        .unwrap();
+    assert_eq!(
+        found(&store, "notes", json!({"$text": composed})),
+        ["nfc", "nfd"]
+    );
+    assert_eq!(
+        found(&store, "notes", json!({"$text": decomposed})),
+        ["nfc", "nfd"]
+    );
+}
+
+#[test]
+fn all_fields_search_reaches_into_nested_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), "pages", Format::Md);
+    store
+        .apply(Tx::new(vec![
+            insert(
+                "pages",
+                "deep",
+                json!({"meta": {"note": "needle"}, "body": "plain"}),
+            ),
+            insert("pages", "flat", json!({"body": "plain"})),
+        ]))
+        .unwrap();
+    assert_eq!(found(&store, "pages", json!({"$text": "needle"})), ["deep"]);
+}
