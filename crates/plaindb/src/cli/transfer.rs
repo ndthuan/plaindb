@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub struct ExportArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "File to write; standard output when left out"
+        help = "File to write; standard output when left out or -"
     )]
     pub out: Option<PathBuf>,
 }
@@ -108,8 +108,51 @@ pub fn import(context: &Context, args: &ImportArgs) -> Result<Output> {
     Ok(report_output(&report))
 }
 
-fn export_to(store: &Store, args: &ExportArgs, out: impl Write) -> Result<u64> {
-    store.export_jsonl(&args.db, &args.coll, BufWriter::new(out))
+struct TempFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn temp_path_beside(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let directory = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    directory.join(format!(".{name}.tmp-{}", plaindb_core::new_id()))
+}
+
+fn export_through_temp_file(store: &Store, args: &ExportArgs, target: &Path) -> Result<u64> {
+    let mut temp = TempFile {
+        path: temp_path_beside(target),
+        armed: false,
+    };
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp.path)?;
+    temp.armed = true;
+    let mut writer = BufWriter::new(file);
+    let exported = store.export_jsonl(&args.db, &args.coll, &mut writer)?;
+    writer.flush()?;
+    writer
+        .into_inner()
+        .map_err(|error| Error::from(error.into_error()))?
+        .sync_all()?;
+    std::fs::rename(&temp.path, target)?;
+    temp.armed = false;
+    Ok(exported)
 }
 
 pub fn export(context: &Context, args: &ExportArgs) -> Result<Output> {
@@ -121,16 +164,23 @@ pub fn export(context: &Context, args: &ExportArgs) -> Result<Output> {
         .with_detail("reason", "no_format"));
     }
     let store = context.open_reader()?;
-    match &args.out {
+    store.collection_meta(&args.db, &args.coll)?;
+    match args
+        .out
+        .as_deref()
+        .filter(|path| *path != Path::new(STDIN_NAME))
+    {
         Some(path) => {
-            let exported = export_to(&store, args, File::create(path)?)?;
+            let exported = export_through_temp_file(&store, args, path)?;
             Ok(Output::text(
                 json!({ "exported": exported, "out": path.to_string_lossy() }),
                 format!("exported {exported} documents"),
             ))
         }
         None => {
-            export_to(&store, args, std::io::stdout().lock())?;
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            store.export_jsonl(&args.db, &args.coll, &mut out)?;
+            out.flush()?;
             Ok(Output::streamed())
         }
     }

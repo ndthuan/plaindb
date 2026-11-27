@@ -256,6 +256,110 @@ fn export_writes_documents_with_versions_to_standard_output_or_a_file() {
     );
 }
 
+fn directory_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("the directory reads")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn export_to_path(store: &Path, collection: &str, out: &Path) -> Run {
+    plaindb(
+        store,
+        None,
+        &[
+            "export",
+            "app",
+            collection,
+            "--jsonl",
+            "--out",
+            out.to_str().expect("a path"),
+        ],
+    )
+}
+
+#[test]
+fn a_failed_export_leaves_the_target_file_as_it_was() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "write",
+        &["put", "app", "notes", "a", "--data", r#"{"n":1}"#],
+    );
+    let target = tempfile::tempdir().expect("a temp dir");
+    let out = target.path().join("backup.jsonl");
+    assert_eq!(export_to_path(dir.path(), "notes", &out).code, 0);
+    let before = fs::read(&out).expect("the file");
+    let run = export_to_path(dir.path(), "missing", &out);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "not_found");
+    assert_eq!(fs::read(&out).expect("the file"), before);
+    assert_eq!(directory_entries(target.path()), ["backup.jsonl"]);
+}
+
+#[test]
+fn an_export_into_a_missing_directory_creates_nothing() {
+    let dir = store_with_collection("json");
+    let target = tempfile::tempdir().expect("a temp dir");
+    let out = target.path().join("absent").join("notes.jsonl");
+    let run = export_to_path(dir.path(), "notes", &out);
+    assert_eq!(run.code, 1);
+    assert!(directory_entries(target.path()).is_empty());
+}
+
+#[test]
+fn an_export_to_a_dash_goes_to_standard_output() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "write",
+        &["put", "app", "notes", "a", "--data", r#"{"n":1}"#],
+    );
+    let work = tempfile::tempdir().expect("a temp dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .current_dir(work.path())
+        .arg("--store")
+        .arg(dir.path())
+        .args(["export", "app", "notes", "--jsonl", "--out", "-"])
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8(output.stdout).expect("text");
+    assert_eq!(text.lines().count(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).expect("JSON")["_id"],
+        "a"
+    );
+    assert!(directory_entries(work.path()).is_empty());
+}
+
+#[test]
+fn an_export_over_an_existing_file_replaces_it_and_leaves_no_temporary_file() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "write",
+        &["put", "app", "notes", "a", "--data", r#"{"n":1}"#],
+    );
+    let target = tempfile::tempdir().expect("a temp dir");
+    let out = target.path().join("backup.jsonl");
+    fs::write(&out, "old\n").expect("a file");
+    assert_eq!(export_to_path(dir.path(), "notes", &out).code, 0);
+    assert_eq!(
+        fs::read_to_string(&out).expect("the file"),
+        raw_export(dir.path(), "notes")
+    );
+    assert_eq!(directory_entries(target.path()), ["backup.jsonl"]);
+}
+
 #[test]
 fn an_export_goes_back_in_through_the_command_line() {
     let dir = store_with_collection("md");
