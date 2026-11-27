@@ -15,7 +15,7 @@ plaindb is a document database whose data is plain text files. Every document is
 
 ## Install
 
-Download the archive for your platform from the [releases page](https://github.com/ndthuan/plaindb/releases), check it against `SHA256SUMS` and put `plaindb` on your `PATH`, or build it from source with `cargo install --git https://github.com/ndthuan/plaindb plaindb`. [Install](docs/install.md) lists the platforms and every step.
+Download the archive for your platform from the [releases page](https://github.com/ndthuan/plaindb/releases), check it against `SHA256SUMS` and put `plaindb` on your `PATH`, or build it from source with `cargo install --git https://github.com/ndthuan/plaindb plaindb`. [Install](docs/install.md) lists the platforms and every step. Windows is not supported yet.
 
 ## Quickstart
 

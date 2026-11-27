@@ -43,3 +43,15 @@ Resident memory of a fresh process, from the same generator and indexes. Steady 
 At 10,000 documents the heap holds about 5.1 KB per document for the parsed documents themselves, 0.4 to 0.6 KB for the text index, 0.4 KB for the field indexes, 0.3 KB for the file entries and 0.2 KB to number the documents for the indexes (`make bench` prints this split). The documents stay parsed so that a query on a field with no index reads them without decoding any file. The resident set grows after many writes while the heap does not: the allocator keeps the freed memory for reuse.
 
 The budget at 10,000 documents is 6,600 bytes of heap per document at steady state and 70 MiB of heap at the peak of a warm open. `make soak` fails when either is exceeded by more than 25%, or when the heap grows by more than 5% over 2,000 writes.
+
+## Limits
+
+Every document is held decoded in memory, so memory and the time to open a store grow in step with the number of documents: about 9 KiB of resident memory per document at 10,000 documents, and a cold open of 739 ms for 10,000 JSON documents, as in the tables above. Each CLI command opens the store again and pays that open, about 100 ms warm at 10,000 documents; `plaindb mcp` pays it on each tool call too.
+
+A query uses an index for the first condition of an `and` that an index covers, not the most selective one, and never for an `or`; `_id` has no faster path than any other field. Every match is sorted before a page is cut, so a sorted first page of a large match costs as much as the whole match.
+
+`status` in manual commit mode reads every file of the store and walks `.git` to find what is not committed yet, so it slows down as the store grows.
+
+An integer that does not fit in 64 bits becomes a floating-point number and loses precision, also when it is written.
+
+Filters look inside arrays: `{"items.sku": "A1"}` matches a document whose `items` array holds an object with that `sku`. Projection with `--fields` and sorting do not go into arrays.
