@@ -581,13 +581,16 @@ pub(crate) fn status_at(root: &Path) -> Result<GitStatus> {
     }
     let repo = open(root)?;
     status.head = head_id(&repo)?.map(|id| id.to_string());
-    status.remote_url = push::remote_url(root, &config.remote)?;
-    if status.remote_url.is_some() {
+    let remote_url = push::remote_url(root, &config.remote)?;
+    if remote_url.is_some() {
         status.unpushed = push::unpushed(root, &config)?;
     }
     let state = push::read_state(root)?;
     status.last_push_at = state.last_push_at;
-    status.last_push_error = state.last_push_error;
+    status.last_push_error = state
+        .last_push_error
+        .map(|text| push::without_credentials(&text, remote_url.as_deref()));
+    status.remote_url = remote_url.as_deref().map(push::display_url);
     status.remote_ahead = state.remote_ahead;
     let gc_state = gc::read_state(root)?;
     status.last_gc_at = gc_state.last_gc_at;

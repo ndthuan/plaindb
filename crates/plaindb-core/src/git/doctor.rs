@@ -136,9 +136,14 @@ fn remote_check(root: &Path, status: &GitStatus, options: DoctorOptions) -> Chec
         Ok(run) if run.success => {
             Check::ok(Group::Git, "git_remote", "the remote is reachable").with_details(details)
         }
-        Ok(run) => unreachable_remote(status, run.stderr.trim(), details),
+        Ok(run) => unreachable_remote(status, &redacted(root, status, run.stderr.trim()), details),
         Err(source) => unreachable_remote(status, &source.to_string(), details),
     }
+}
+
+fn redacted(root: &Path, status: &GitStatus, text: &str) -> String {
+    let url = super::push::remote_url(root, &status.remote).ok().flatten();
+    super::push::without_credentials(text, url.as_deref())
 }
 
 fn unreachable_remote(status: &GitStatus, reason: &str, details: serde_json::Value) -> Check {

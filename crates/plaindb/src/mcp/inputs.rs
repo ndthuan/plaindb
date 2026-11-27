@@ -10,9 +10,11 @@ use crate::cli::read::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NoInput {}
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DbInput {
     #[schemars(description = "Name of the database")]
     pub db: String,
@@ -25,6 +27,7 @@ impl From<DbInput> for DbArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CollectionInput {
     #[schemars(description = "Name of the database")]
     pub db: String,
@@ -42,6 +45,7 @@ impl From<CollectionInput> for CollectionArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetInput {
     pub db: String,
     pub collection: String,
@@ -67,6 +71,7 @@ fn filter_text(filter: Option<Value>) -> Option<String> {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FindInput {
     pub db: String,
     pub collection: String,
@@ -100,6 +105,7 @@ impl From<FindInput> for FindArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CountInput {
     pub db: String,
     pub collection: String,
@@ -118,6 +124,7 @@ impl From<CountInput> for CountArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DistinctInput {
     pub db: String,
     pub collection: String,
@@ -139,6 +146,7 @@ impl From<DistinctInput> for DistinctArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryInput {
     pub db: String,
     pub collection: String,
@@ -159,6 +167,7 @@ impl From<HistoryInput> for HistoryArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InsertInput {
     pub db: String,
     pub collection: String,
@@ -169,6 +178,7 @@ pub struct InsertInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PutInput {
     pub db: String,
     pub collection: String,
@@ -180,6 +190,7 @@ pub struct PutInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PatchInput {
     pub db: String,
     pub collection: String,
@@ -191,6 +202,7 @@ pub struct PatchInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteInput {
     pub db: String,
     pub collection: String,
@@ -229,6 +241,7 @@ pub struct TxOp {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TxInput {
     #[schemars(description = "Operations applied together: all of them or none")]
     pub ops: Vec<TxOp>,
@@ -243,6 +256,7 @@ pub enum FormatInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCollectionInput {
     pub db: String,
     pub collection: String,
@@ -265,6 +279,7 @@ impl From<CreateCollectionInput> for CollectionCreateArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetSchemaInput {
     pub db: String,
     pub collection: String,
@@ -273,6 +288,7 @@ pub struct SetSchemaInput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddIndexInput {
     pub db: String,
     pub collection: String,
@@ -309,6 +325,7 @@ impl From<AddIndexInput> for IndexAddArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropIndexInput {
     pub db: String,
     pub collection: String,
@@ -327,6 +344,7 @@ impl From<DropIndexInput> for IndexDropArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CommitInput {
     #[schemars(description = "Message of the commit")]
     pub message: Option<String>,
@@ -341,21 +359,19 @@ impl From<CommitInput> for CommitArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct PushInput {
-    #[schemars(description = "Clear the remote_ahead flag before pushing")]
-    #[serde(default)]
-    pub reset_remote_ahead: bool,
-}
+#[serde(deny_unknown_fields)]
+pub struct PushInput {}
 
 impl From<PushInput> for PushArgs {
-    fn from(input: PushInput) -> Self {
+    fn from(_: PushInput) -> Self {
         Self {
-            reset_remote_ahead: input.reset_remote_ahead,
+            reset_remote_ahead: false,
         }
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DoctorInput {
     #[schemars(description = "Do not contact the remote")]
     #[serde(default)]

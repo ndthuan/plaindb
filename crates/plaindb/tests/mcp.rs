@@ -510,3 +510,122 @@ async fn doctor_is_offered_read_only_and_matches_the_command_line() {
     assert_eq!(without_disk(reported), without_disk(direct));
     session.cancel().await.expect("the server stops");
 }
+
+async fn refused_message(session: &Session, tool: &str, arguments: Value) -> String {
+    let error = session
+        .call_tool(CallToolRequestParams::new(tool.to_owned()).with_arguments(object(arguments)))
+        .await
+        .expect_err("the call is refused");
+    let text = format!("{error:?}");
+    assert!(text.contains("-32602"), "{tool}: {text}");
+    text
+}
+
+#[tokio::test]
+async fn an_unknown_argument_is_refused_by_name_and_changes_nothing() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    prepare(&session).await;
+    let written = succeed(
+        &session,
+        "plaindb_insert",
+        json!({"db": "app", "collection": "notes", "id": "a", "doc": {"n": 1}}),
+    )
+    .await;
+    let version = written["results"][0]["version"].clone();
+    let message = refused_message(
+        &session,
+        "plaindb_put",
+        json!({"db": "app", "collection": "notes", "id": "a", "doc": {"n": 2}, "ifVersion": version}),
+    )
+    .await;
+    assert!(message.contains("ifVersion"), "{message}");
+    let message = refused_message(
+        &session,
+        "plaindb_delete",
+        json!({"db": "app", "collection": "notes", "id": "a", "version": version}),
+    )
+    .await;
+    assert!(message.contains("version"), "{message}");
+    let message = refused_message(
+        &session,
+        "plaindb_count",
+        json!({"db": "app", "collection": "notes", "filters": {"n": 1}}),
+    )
+    .await;
+    assert!(message.contains("filters"), "{message}");
+    let read = succeed(
+        &session,
+        "plaindb_get",
+        json!({"db": "app", "collection": "notes", "id": "a"}),
+    )
+    .await;
+    assert_eq!(read["doc"]["n"], 1, "{read}");
+    assert_eq!(read["version"], version, "{read}");
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn every_tool_schema_refuses_unknown_arguments() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &["--allow-drop"]).await;
+    let tools = session.list_all_tools().await.expect("tools are listed");
+    assert!(!tools.is_empty());
+    for tool in tools {
+        assert_eq!(
+            tool.input_schema.get("additionalProperties"),
+            Some(&Value::Bool(false)),
+            "{}",
+            tool.name
+        );
+    }
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn push_takes_no_argument_that_clears_the_remote_ahead_mark() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    let message = refused_message(
+        &session,
+        "plaindb_push",
+        json!({"reset_remote_ahead": true}),
+    )
+    .await;
+    assert!(message.contains("reset_remote_ahead"), "{message}");
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn status_hides_the_credentials_of_an_https_remote() {
+    let dir = TempDir::new().expect("a temporary directory");
+    let store = dir.path().join("store");
+    assert_eq!(
+        cli(
+            &store,
+            &[
+                "init",
+                "--git",
+                "--remote",
+                "https://user:s3cret@example.com/r.git"
+            ]
+        )["ok"],
+        true
+    );
+    let session = start(&store, &[]).await;
+    let status = succeed(&session, "plaindb_status", json!({})).await;
+    assert_eq!(
+        status["git"]["remote_url"], "https://***@example.com/r.git",
+        "{status}"
+    );
+    assert!(!status.to_string().contains("s3cret"), "{status}");
+    let doctor = succeed(&session, "plaindb_doctor", json!({"offline": true})).await;
+    assert!(!doctor.to_string().contains("s3cret"), "{doctor}");
+    let cli_status = cli(&store, &["status"]);
+    assert_eq!(
+        cli_status["result"]["git"]["remote_url"],
+        "https://***@example.com/r.git"
+    );
+    assert!(!cli_status.to_string().contains("s3cret"));
+    session.cancel().await.expect("the server stops");
+}

@@ -197,6 +197,29 @@ pub(crate) fn remote_url(root: &Path, remote: &str) -> Result<Option<String>> {
         .map(|value| value.to_string()))
 }
 
+pub(crate) fn display_url(url: &str) -> String {
+    let Some(scheme_end) = ["http://", "https://"]
+        .into_iter()
+        .find(|scheme| url.starts_with(scheme))
+        .map(str::len)
+    else {
+        return url.to_owned();
+    };
+    let rest = &url[scheme_end..];
+    let authority = rest.find('/').map_or(rest, |slash| &rest[..slash]);
+    match authority.rfind('@') {
+        Some(at) => format!("{}***{}", &url[..scheme_end], &rest[at..]),
+        None => url.to_owned(),
+    }
+}
+
+pub(crate) fn without_credentials(text: &str, url: Option<&str>) -> String {
+    match url {
+        Some(url) if display_url(url) != url => text.replace(url, &display_url(url)),
+        _ => text.to_owned(),
+    }
+}
+
 pub(crate) fn unpushed(root: &Path, config: &StoreConfig) -> Result<u64> {
     let repo = open(root)?;
     let Some(head) = head_id(&repo)? else {

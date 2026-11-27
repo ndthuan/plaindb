@@ -413,3 +413,38 @@ fn the_push_names_the_remote_after_a_separator_and_sends_a_full_refspec() {
         );
     }
 }
+
+#[test]
+fn the_status_and_doctor_show_an_https_remote_without_its_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init_with_git(dir.path().join("store")).unwrap();
+    for (url, shown) in [
+        (
+            "https://user:s3cret@example.com/r.git",
+            "https://***@example.com/r.git",
+        ),
+        (
+            "https://tok@example.com/r.git",
+            "https://***@example.com/r.git",
+        ),
+        ("http://user:pw@example.com", "http://***@example.com"),
+        ("ssh://git@example.com/r.git", "ssh://git@example.com/r.git"),
+        ("git@example.com:r.git", "git@example.com:r.git"),
+        ("/tmp/r.git", "/tmp/r.git"),
+        ("https://example.com/a@b.git", "https://example.com/a@b.git"),
+    ] {
+        store.set_remote(url).unwrap();
+        let status = store.status().unwrap();
+        assert_eq!(status.git.remote_url.as_deref(), Some(shown), "{url}");
+        let report = plaindb_core::doctor::inspect(
+            store.root(),
+            plaindb_core::doctor::DoctorOptions { offline: true },
+        );
+        let text = serde_json::to_string(&report.to_json()).unwrap();
+        let listed = format!("{status:?}");
+        for secret in ["s3cret", "tok@", "user:pw"] {
+            assert!(!text.contains(secret), "{url}: {text}");
+            assert!(!listed.contains(secret), "{url}: {listed}");
+        }
+    }
+}
