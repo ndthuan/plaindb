@@ -17,6 +17,7 @@ const GC_LOCK_FILE: &str = "gc.lock";
 const GC_STATE_FILE: &str = "gc.json";
 const GC_COUNT_FILE: &str = "gc-count.json";
 const GC_TIMEOUT: Duration = Duration::from_secs(600);
+const GC_PID_FILE: &str = "gc.pid";
 const ALREADY_RUNNING: &str = "already running";
 const GIT_NOT_FOUND: &str = "git_not_found";
 
@@ -114,14 +115,20 @@ fn finish(
 fn collect(root: &Path, auto: bool) -> Result<GcReport> {
     let git_dir = root.join(".git");
     let counted = read_count(root);
-    let Some(lock) = try_lock_file(root, GC_LOCK_FILE)? else {
+    let busy = || {
         let bytes = directory_bytes(&git_dir);
-        return Ok(GcReport {
+        GcReport {
             outcome: GcOutcome::Busy,
             error: None,
             bytes_before: bytes,
             bytes_after: bytes,
-        });
+        }
+    };
+    if auto && git_dir.join(GC_PID_FILE).exists() {
+        return Ok(busy());
+    }
+    let Some(lock) = try_lock_file(root, GC_LOCK_FILE)? else {
+        return Ok(busy());
     };
     let before = directory_bytes(&git_dir);
     let mut args = vec!["-c", "gc.autoDetach=false", "gc", "--quiet"];

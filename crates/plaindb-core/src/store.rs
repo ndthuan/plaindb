@@ -71,6 +71,7 @@ pub struct Store {
     pub(crate) snapshot: ArcSwap<Snapshot>,
     pub(crate) writer: Mutex<WriterState>,
     pub(crate) reader: bool,
+    last_seen_head: Mutex<Option<git::HeadMark>>,
 }
 
 pub type Version = String;
@@ -216,12 +217,14 @@ impl Store {
         )?;
         let snapshot = ArcSwap::from_pointee(scan::full_scan(&root)?);
         let writer = Mutex::new(WriterState::new(&config));
+        let root_for_mark = root.clone();
         let store = Self {
             root,
             config: ArcSwap::from_pointee(config),
             snapshot,
             writer,
             reader: false,
+            last_seen_head: Mutex::new(git::head_mark(&root_for_mark)),
         };
         if store.config.load().git {
             store.turn_git_on(git::INIT_STORE_SUBJECT)?;
@@ -239,6 +242,7 @@ impl Store {
                 git::prepare_write(&root)?;
             }
         }
+        let last_seen_head = Mutex::new(git::head_mark(&root));
         let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
         Ok(Self {
             root,
@@ -246,6 +250,7 @@ impl Store {
             snapshot,
             writer: Mutex::new(writer),
             reader: false,
+            last_seen_head,
         })
     }
 
@@ -267,6 +272,7 @@ impl Store {
                 Err(error) => tracing::debug!("the write lock was not taken: {}", error.message),
             }
         }
+        let last_seen_head = Mutex::new(git::head_mark(&root));
         let snapshot = ArcSwap::from_pointee(open_snapshot(&root)?);
         Ok(Self {
             root,
@@ -274,6 +280,7 @@ impl Store {
             snapshot,
             writer: Mutex::new(writer),
             reader: true,
+            last_seen_head,
         })
     }
 
@@ -370,20 +377,46 @@ impl Store {
     }
 
     pub fn rescan(&self) -> Result<()> {
+        let head = self.read_head_mark();
         let current = self.snapshot.load_full();
         let next = Arc::new(scan::rescan(&self.root, &current)?);
         self.snapshot.compare_and_swap(&current, next);
+        self.saw_head(head);
         Ok(())
     }
 
     pub fn refresh_if_moved(&self) -> Result<()> {
+        let head = self.read_head_mark();
         let current = self.snapshot.load_full();
-        if scan::read_generation(&self.root)? == current.generation {
+        if scan::read_generation(&self.root)? == current.generation && !self.head_moved(&head) {
             return Ok(());
         }
         let next = Arc::new(scan::rescan(&self.root, &current)?);
         self.snapshot.compare_and_swap(&current, next);
+        self.saw_head(head);
         Ok(())
+    }
+
+    pub(crate) fn read_head_mark(&self) -> Option<git::HeadMark> {
+        if self.config.load().git {
+            git::head_mark(&self.root)
+        } else {
+            None
+        }
+    }
+
+    fn last_seen_head(&self) -> MutexGuard<'_, Option<git::HeadMark>> {
+        self.last_seen_head
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn head_moved(&self, head: &Option<git::HeadMark>) -> bool {
+        *self.last_seen_head() != *head
+    }
+
+    pub(crate) fn saw_head(&self, head: Option<git::HeadMark>) {
+        *self.last_seen_head() = head;
     }
 
     pub(crate) fn with_collection<T>(

@@ -12,6 +12,8 @@ use crate::doctor::{Check, DoctorOptions, Group};
 const FIX_MISSING_BINARY: &str =
     "install git, or set the PLAINDB_GIT environment variable to the git program's path";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const COMMIT_LOCKS: &[&str] = &["index.lock", "HEAD.lock", "packed-refs.lock", "config.lock"];
+const WORKTREE_PATHS_SHOWN: usize = 10;
 const STALE_LOCK: Duration = Duration::from_secs(600);
 const LOOSE_OBJECTS_WITHOUT_HOUSEKEEPING: u64 = 6_700;
 
@@ -42,6 +44,7 @@ pub(crate) fn checks(root: &Path, config: &StoreConfig, options: DoctorOptions) 
         last_push_check(&status),
         lock_files_check(root),
         missing_commits_check(root),
+        worktree_check(root),
         foreign_check(root),
         housekeeping_check(root, config, &status),
     ]
@@ -227,7 +230,9 @@ fn remote_ahead_check(status: &GitStatus) -> Check {
         "the remote has commits this store lacks, so pushes are refused",
     )
     .with_details(json!({ "remote_ahead": true }))
-    .with_fix("merge the remote branch into the store's repository with git, then run plaindb push")
+    .with_fix(
+        "merge the remote branch into the store's repository with git, then run plaindb push --reset-remote-ahead",
+    )
 }
 
 fn last_push_check(status: &GitStatus) -> Check {
@@ -263,19 +268,11 @@ fn collect_locks(dir: &Path, found: &mut Vec<PathBuf>) {
 
 fn lock_files_check(root: &Path) -> Check {
     let git_dir = root.join(GIT_DIR);
-    let mut paths = Vec::new();
-    if let Ok(entries) = fs::read_dir(&git_dir) {
-        for entry in entries.filter_map(std::result::Result::ok) {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "lock")
-                && path.is_file()
-            {
-                paths.push(path);
-            }
-        }
-    }
+    let mut paths: Vec<PathBuf> = COMMIT_LOCKS
+        .iter()
+        .map(|name| git_dir.join(name))
+        .filter(|path| path.is_file())
+        .collect();
     collect_locks(&git_dir.join("refs"), &mut paths);
     paths.sort();
     let now = SystemTime::now();
@@ -318,8 +315,8 @@ fn lock_files_check(root: &Path) -> Check {
         )
         .with_details(json!({ "locks": listing }))
         .with_fix(format!(
-            "make sure no git process runs on the store, then remove {}",
-            path.display()
+            "make sure no git process runs on the store, then rm {}",
+            shell_quote(path)
         ));
     }
     Check::warn(
@@ -345,7 +342,7 @@ fn missing_commits_check(root: &Path) -> Check {
         .with_details(json!({ "transactions": found.tx_ids.len(), "message": found.message }))
         .with_fix(format!(
             "remove the cause (for a stale lock: rm {}), then run any write or plaindb commit",
-            root.join(GIT_DIR).join("index.lock").display()
+            shell_quote(&root.join(GIT_DIR).join("index.lock"))
         )),
         _ => Check::ok(
             Group::Git,
@@ -356,6 +353,52 @@ fn missing_commits_check(root: &Path) -> Check {
     }
 }
 
+fn worktree_check(root: &Path) -> Check {
+    let pending = match super::pending::read(root) {
+        Ok(pending) => pending.len(),
+        Err(error) => {
+            return Check::error(Group::Git, "git_worktree", error.message)
+                .with_details(error.details);
+        }
+    };
+    if pending > 0 {
+        return Check::ok(
+            Group::Git,
+            "git_worktree",
+            format!("{pending} transactions wait for plaindb commit"),
+        )
+        .with_details(json!({ "count": 0, "paths": [], "pending_transactions": pending }));
+    }
+    let changes = match super::commit::worktree_changes(root) {
+        Ok(changes) => changes,
+        Err(error) => {
+            return Check::error(Group::Git, "git_worktree", error.message)
+                .with_details(error.details);
+        }
+    };
+    let paths: Vec<&str> = changes
+        .iter()
+        .take(WORKTREE_PATHS_SHOWN)
+        .map(super::commit::Change::path)
+        .collect();
+    let details = json!({ "count": changes.len(), "paths": paths, "pending_transactions": 0 });
+    if changes.is_empty() {
+        return Check::ok(
+            Group::Git,
+            "git_worktree",
+            "every file of the databases is committed",
+        )
+        .with_details(details);
+    }
+    Check::warn(
+        Group::Git,
+        "git_worktree",
+        format!("{} files differ from the last commit", changes.len()),
+    )
+    .with_details(details)
+    .with_fix("plaindb commit")
+}
+
 fn foreign_check(root: &Path) -> Check {
     match read_warning(root) {
         Ok(Some(warning)) => Check::warn(
@@ -364,7 +407,9 @@ fn foreign_check(root: &Path) -> Check {
             format!("{} commits were made outside plaindb", warning.ids.len()),
         )
         .with_details(json!({ "ids": warning.ids, "at": warning.at, "head": warning.head }))
-        .with_fix("review the commits with git log; the warning clears with the next commit"),
+        .with_fix(
+            "review the commits with git log; the warning clears after the next two commits made by plaindb",
+        ),
         _ => Check::ok(
             Group::Git,
             "git_foreign_commits",
@@ -412,7 +457,7 @@ fn housekeeping_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> 
             ),
         )
         .with_details(details)
-        .with_fix(format!("git -C {} gc", root.display()));
+        .with_fix(format!("git -C {} gc", shell_quote(root)));
     }
     if behind || unmanaged {
         return Check::warn(
@@ -423,7 +468,7 @@ fn housekeeping_check(root: &Path, config: &StoreConfig, status: &GitStatus) -> 
         .with_details(details)
         .with_fix(format!(
             "git -C {} gc, or plaindb config set gc_every 200",
-            root.display()
+            shell_quote(root)
         ));
     }
     Check::ok(

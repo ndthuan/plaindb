@@ -28,6 +28,14 @@ pub(crate) enum Change {
     RemoveTree { path: String },
 }
 
+impl Change {
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            Self::Write { path, .. } | Self::Remove { path } | Self::RemoveTree { path } => path,
+        }
+    }
+}
+
 fn blob_id(bytes: &[u8]) -> Result<ObjectId> {
     ObjectId::from_hex(version_of(bytes).as_bytes()).map_err(git_error)
 }

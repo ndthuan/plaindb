@@ -150,6 +150,31 @@ pub(crate) fn open(root: &Path) -> Result<gix::Repository> {
     gix::open_opts(root, open_options()).map_err(git_error)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadMark(Vec<Option<(u64, Option<std::time::SystemTime>, u64)>>);
+
+fn file_stamp(path: &Path) -> Option<(u64, Option<std::time::SystemTime>, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((inode, meta.modified().ok(), meta.len()))
+}
+
+pub(crate) fn head_mark(root: &Path) -> Option<HeadMark> {
+    let git_dir = root.join(GIT_DIR);
+    let head = git_dir.join("HEAD");
+    let text = fs::read_to_string(&head).ok()?;
+    let mut files = vec![head, git_dir.join("packed-refs")];
+    if let Some(name) = text.strip_prefix("ref: ") {
+        files.push(git_dir.join(name.trim()));
+    }
+    Some(HeadMark(
+        files.iter().map(|path| file_stamp(path)).collect(),
+    ))
+}
+
 pub(crate) fn head_id(repo: &gix::Repository) -> Result<Option<ObjectId>> {
     Ok(repo.head().map_err(git_error)?.id().map(gix::Id::detach))
 }

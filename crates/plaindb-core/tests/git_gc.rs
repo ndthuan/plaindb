@@ -290,3 +290,22 @@ fn a_gc_already_running_elsewhere_is_recorded_as_busy_not_as_an_error() {
     assert_eq!(git.last_gc_outcome.as_deref(), Some("busy"));
     assert_eq!(git.last_gc_error, None);
 }
+
+#[test]
+fn a_gc_pid_left_by_another_git_skips_the_automatic_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let store = collecting_store(&root, 1);
+    let calls = dir.path().join("gc-calls");
+    let bin = fake_git(dir.path(), &format!("echo gc >> {}", calls.display()));
+    plaindb_core::set_git_program(&root, Some(bin.join("git").to_str().unwrap().to_owned()));
+    store.apply(put("a", 1)).unwrap();
+    assert!(calls.exists());
+    fs::remove_file(&calls).unwrap();
+    let state = root.join(".plaindb/gc.json");
+    let before = fs::read(&state).unwrap();
+    fs::write(root.join(".git/gc.pid"), "1 elsewhere").unwrap();
+    store.apply(put("b", 2)).unwrap();
+    assert!(!calls.exists());
+    assert_eq!(fs::read(&state).unwrap(), before);
+}

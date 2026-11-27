@@ -585,11 +585,16 @@ impl Store {
         } else {
             false
         };
+        let head = self.read_head_mark();
         let current = self.snapshot.load_full();
-        if foreign || scan::read_generation(&self.root)? != current.generation {
+        if foreign
+            || self.head_moved(&head)
+            || scan::read_generation(&self.root)? != current.generation
+        {
             self.snapshot
                 .store(Arc::new(scan::rescan(&self.root, &current)?));
         }
+        self.saw_head(head);
         Ok(lock)
     }
 
@@ -743,5 +748,6 @@ impl Store {
             });
         }
         self.snapshot.store(Arc::new(next));
+        self.saw_head(self.read_head_mark());
     }
 }

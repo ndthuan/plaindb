@@ -191,3 +191,35 @@ fn plaindb_commits_from_another_process_are_not_foreign() {
     assert!(foreign_warnings(&first).is_empty());
     assert!(foreign_warnings(&Store::open(root).unwrap()).is_empty());
 }
+
+#[test]
+fn an_open_store_reads_documents_brought_by_a_fast_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.git");
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    let first = dir.path().join("first");
+    let writer = git_store(&first);
+    writer.set_remote(remote.to_str().unwrap()).unwrap();
+    writer.push().unwrap();
+    let second = dir.path().join("second");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+    );
+    let reader = Store::open(&second).unwrap();
+    assert!(reader.get("main", "items", "b").unwrap().is_none());
+
+    writer
+        .apply(Tx::new(vec![put("b", json!({"n": 2}))]))
+        .unwrap();
+    writer.push().unwrap();
+    git(&second, &["pull", "-q", "--ff-only"]);
+    reader.refresh_if_moved().unwrap();
+    assert_eq!(reader.get("main", "items", "b").unwrap().unwrap().0["n"], 2);
+}

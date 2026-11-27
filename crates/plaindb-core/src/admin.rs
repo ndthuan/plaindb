@@ -40,9 +40,11 @@ impl Store {
                 deferred.message
             );
         }
+        let head = self.read_head_mark();
         let current = self.snapshot.load_full();
         self.snapshot
             .store(Arc::new(scan::rescan(&self.root, &current)?));
+        self.saw_head(head);
         Ok(())
     }
 
