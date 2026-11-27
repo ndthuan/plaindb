@@ -346,18 +346,119 @@ fn a_hand_edit_after_the_commit_survives_the_replay() {
 }
 
 #[test]
-fn a_created_file_removed_by_hand_stays_removed_after_a_reboot() {
+fn a_created_file_missing_after_a_reboot_is_written_again() {
     let temp = tempfile::tempdir().unwrap();
     seeded_store(temp.path());
     written_but_not_checkpointed(temp.path(), 0);
     let path = temp.path().join("main").join("items").join("c1.json");
+    let committed = fs::read(&path).unwrap();
     fs::remove_file(&path).unwrap();
     open_after_a_reboot(temp.path());
     let store = Store::open(temp.path()).unwrap();
     assert!(journal_is_empty(temp.path()));
+    assert_eq!(fs::read(&path).unwrap(), committed);
+    assert_committed(&store);
+}
+
+fn journaled_without_checkpoint(store: Store, txs: Vec<Tx>) {
+    for tx in txs {
+        store.apply(tx).unwrap();
+    }
+    std::mem::forget(store);
+}
+
+fn put(id: &str, value: Value) -> Op {
+    Op::Put {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: id.to_owned(),
+        doc: doc(value),
+        if_version: None,
+    }
+}
+
+fn delete(id: &str) -> Op {
+    Op::Delete {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: id.to_owned(),
+        if_version: None,
+    }
+}
+
+#[test]
+fn a_created_file_removed_by_a_later_transaction_stays_removed() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = seeded_store(temp.path());
+    journaled_without_checkpoint(
+        store,
+        vec![
+            Tx::new(vec![insert("n1", json!({"v": 1}))]),
+            Tx::new(vec![delete("n1")]),
+        ],
+    );
+    assert!(!journal_is_empty(temp.path()));
+    let path = temp.path().join("main").join("items").join("n1.json");
     assert!(!path.exists());
-    assert!(store.get("main", "items", "c1").unwrap().is_none());
-    assert!(store.get("main", "items", "c2").unwrap().is_some());
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert!(!path.exists());
+    assert!(store.get("main", "items", "n1").unwrap().is_none());
+}
+
+#[test]
+fn a_created_then_replaced_file_missing_after_a_reboot_gets_its_last_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = seeded_store(temp.path());
+    journaled_without_checkpoint(
+        store,
+        vec![
+            Tx::new(vec![insert("n1", json!({"v": 1}))]),
+            Tx::new(vec![put("n1", json!({"v": 2}))]),
+        ],
+    );
+    assert!(!journal_is_empty(temp.path()));
+    let path = temp.path().join("main").join("items").join("n1.json");
+    let last = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_eq!(fs::read(&path).unwrap(), last);
+    let (found, _) = store.get("main", "items", "n1").unwrap().unwrap();
+    assert_eq!(found["v"], json!(2));
+}
+
+#[test]
+fn a_file_edited_by_hand_after_its_transaction_is_kept() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = seeded_store(temp.path());
+    journaled_without_checkpoint(store, vec![Tx::new(vec![insert("n1", json!({"v": 1}))])]);
+    assert!(!journal_is_empty(temp.path()));
+    let path = temp.path().join("main").join("items").join("n1.json");
+    let edited = "{\n  \"_id\": \"n1\",\n  \"v\": 9\n}\n";
+    fs::write(&path, edited).unwrap();
+    open_after_a_reboot(temp.path());
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    let (found, _) = store.get("main", "items", "n1").unwrap().unwrap();
+    assert_eq!(found["v"], json!(9));
+}
+
+#[test]
+fn a_damaged_generation_file_applies_the_journal_again() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    written_but_not_checkpointed(temp.path(), 0);
+    fs::write(temp.path().join(".plaindb").join("generation"), "x\n").unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert_committed(&store);
+    assert!(store.get("main", "items", "b").unwrap().is_none());
+    let (found, _) = store.get("main", "items", "a").unwrap().unwrap();
+    assert_eq!(found["v"], json!(2));
 }
 
 fn stray_temp_file(root: &Path, age: Duration) -> PathBuf {

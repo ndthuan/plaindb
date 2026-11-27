@@ -159,7 +159,7 @@ fn hand_edit(
     ))
 }
 
-fn delete_created(root: &Path, random: &mut Random) -> Option<(u64, String, String)> {
+fn delete_created(root: &Path, random: &mut Random) -> Option<(PathBuf, String)> {
     let mut created: Vec<String> = journal_records(root)
         .iter()
         .flat_map(|journal| journal["entries"].as_array().cloned().unwrap_or_default())
@@ -178,12 +178,10 @@ fn delete_created(root: &Path, random: &mut Random) -> Option<(u64, String, Stri
     }
     created.sort();
     created.dedup();
-    let path = created[usize::try_from(random.below(created.len() as u64)).unwrap()].clone();
-    fs::remove_file(root.join(&path)).unwrap();
-    let mut parts = path.split('/').skip(1);
-    let collection = parts.next()?.to_owned();
-    let id = parts.next()?.rsplit_once('.')?.0.to_owned();
-    Some((read_generation(root).unwrap(), collection, id))
+    let path = root.join(&created[usize::try_from(random.below(created.len() as u64)).unwrap()]);
+    let version = version_of(&fs::read(&path).unwrap());
+    fs::remove_file(&path).unwrap();
+    Some((path, version))
 }
 
 fn open_after_a_reboot(root: &Path, boot: u64) {
@@ -252,7 +250,7 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
     let mut settled: Vec<(Vec<String>, TxResult)> = Vec::new();
     let mut settled_ids: HashSet<String> = HashSet::new();
     let mut edits: Vec<(u64, String, String, Option<String>)> = Vec::new();
-    let mut deletes = 0;
+    let mut restored_files = 0;
     let mut kills = 0;
     let mut checkpoint_crashes = 0;
     let started = Instant::now();
@@ -355,13 +353,23 @@ fn writers_killed_at_random_lose_no_commit_and_no_hand_edit() {
             settled_ids.insert(tx_id);
             settled.push((collections, result));
         }
-        if let Some((generation, collection, id)) = delete_created(&root, &mut random) {
-            edits.push((generation, collection, id, None));
-            deletes += 1;
-        }
+        let deleted = delete_created(&root, &mut random);
         open_after_a_reboot(&root, round);
+        if let Some((path, version)) = deleted {
+            let restored = fs::read(&path).ok().map(|bytes| version_of(&bytes));
+            assert_eq!(
+                restored,
+                Some(version),
+                "{} was not written again",
+                path.display()
+            );
+            restored_files += 1;
+        }
     }
-    assert!(deletes > 10, "only {deletes} hand deletes");
+    assert!(
+        restored_files > 10,
+        "only {restored_files} files written again"
+    );
 
     let mut events: Vec<(u64, u64, String, String, Event)> = Vec::new();
     let mut begins: HashMap<String, Vec<String>> = HashMap::new();

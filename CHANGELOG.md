@@ -38,6 +38,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - A file plaindb rewrites keeps its permission bits on Unix; before, a mode set by hand was lost on the next write of that document.
 - Recovery, when a store is opened or an interrupted write is finished, removes a leftover temp file only when it is older than 60 seconds, so the temp file of a write still in progress, such as an index cache a reader is saving, is left alone.
 - The journal is also checkpointed once it reaches 32 MiB, so large writes do not pile up in it until the checkpoint interval.
+- After the machine restarts, a document file that a committed insert created and that is missing is written again from the journal, so an insert whose rename a power loss took is no longer lost; later transactions in the journal still have the last word. A file deleted by hand before the next checkpoint therefore comes back after a reboot. A generation file that cannot be read as a number now logs a warning.
 
 ## [0.1.0] - 2026-11-26
 

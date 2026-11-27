@@ -50,6 +50,10 @@ const TABLE: &[Row] = &[
             "crash::a_hand_edit_after_the_commit_survives_the_replay",
             "crash::a_file_removed_by_hand_after_the_commit_stays_removed",
             "files::a_hand_edited_file_is_not_overwritten",
+            "crash::a_created_file_missing_after_a_reboot_is_written_again",
+            "crash::a_created_file_removed_by_a_later_transaction_stays_removed",
+            "crash::a_created_then_replaced_file_missing_after_a_reboot_gets_its_last_version",
+            "crash::a_file_edited_by_hand_after_its_transaction_is_kept",
         ],
     },
     Row {

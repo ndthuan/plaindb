@@ -123,8 +123,7 @@ impl JournalEntry {
         if replay != Replay::Always {
             let current = read_version(&target)?;
             let wanted = bytes.as_deref().map(version_of);
-            let created_then_removed = current.is_none() && self.old_version.is_none();
-            if current == wanted || current != self.old_version || created_then_removed {
+            if current == wanted || current != self.old_version {
                 return Ok(());
             }
         }

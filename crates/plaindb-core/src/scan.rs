@@ -86,7 +86,12 @@ pub fn full_scan(root: &Path) -> Result<Snapshot> {
 
 pub fn read_generation(root: &Path) -> Result<u64> {
     match fs::read_to_string(root.join(STATE_DIR).join(GENERATION_FILE)) {
-        Ok(text) => Ok(text.trim().parse().unwrap_or(0)),
+        Ok(text) => Ok(text.trim().parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                "the generation file is damaged; every journal record will be applied again"
+            );
+            0
+        })),
         Err(source) if source.kind() == ErrorKind::NotFound => Ok(0),
         Err(source) => Err(source.into()),
     }
