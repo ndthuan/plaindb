@@ -268,11 +268,15 @@ impl FieldIndex {
         &self.unindexed
     }
 
-    fn duplicates(&self) -> Option<(&Value, &RoaringBitmap)> {
+    fn duplicated(&self) -> impl Iterator<Item = (&Value, &RoaringBitmap)> {
         self.entries
             .iter()
-            .find(|(_, set)| set.len() > 1)
+            .filter(|(_, set)| set.len() > 1)
             .map(|(key, set)| (&key.0, set.as_ref()))
+    }
+
+    fn duplicates(&self) -> Option<(&Value, &RoaringBitmap)> {
+        self.duplicated().next()
     }
 }
 
@@ -530,6 +534,18 @@ impl Indexes {
 
     pub fn for_path(&self, path: &[String]) -> Option<&FieldIndex> {
         self.fields.iter().find(|index| index.path == path)
+    }
+
+    pub(crate) fn all_duplicates(&self) -> Vec<(&str, Value, Vec<String>)> {
+        let mut found = Vec::new();
+        for index in self.fields.iter().filter(|index| index.unique) {
+            for (value, set) in index.duplicated() {
+                let mut ids = self.ids(set);
+                ids.sort();
+                found.push((index.field.as_str(), value.clone(), ids));
+            }
+        }
+        found
     }
 
     pub fn ids(&self, set: &RoaringBitmap) -> Vec<String> {

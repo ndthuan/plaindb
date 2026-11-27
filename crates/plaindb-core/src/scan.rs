@@ -3,7 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync};
 use serde_json::Value;
@@ -26,6 +26,7 @@ pub(crate) const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"
 pub const GENERATION_FILE: &str = "generation";
 
 const CHECKED_ATTEMPTS: usize = 5;
+const RACY_WINDOW: Duration = Duration::from_secs(2);
 pub(crate) const SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const UNREADABLE_REASON: &str = "unreadable";
 pub(crate) const TOO_LARGE_REASON: &str = "too_large";
@@ -178,6 +179,7 @@ pub(crate) fn file_entry(
         size: 0,
         mtime_ns: 0,
         inode: 0,
+        racy: false,
         outcome: load(path, stem, meta, validator, bytes),
     };
     stamp(&mut entry, metadata);
@@ -188,6 +190,15 @@ pub(crate) fn stamp(entry: &mut FileEntry, metadata: &fs::Metadata) {
     entry.size = metadata.len();
     entry.mtime_ns = modified_ns(metadata);
     entry.inode = inode_of(metadata);
+    entry.racy = metadata.modified().is_ok_and(|modified| {
+        SystemTime::now()
+            .duration_since(modified)
+            .map_or(true, |elapsed| elapsed < RACY_WINDOW)
+    });
+}
+
+fn unchanged_bytes(known: &FileEntry, bytes: &[u8]) -> bool {
+    matches!(&known.outcome, Outcome::Doc(found) if found.version == version_of(bytes))
 }
 
 fn modified_ns(metadata: &fs::Metadata) -> i128 {
@@ -227,6 +238,7 @@ fn unread_entry(
         size: 0,
         mtime_ns: 0,
         inode: 0,
+        racy: false,
         outcome,
     };
     if let Some(metadata) = metadata {
@@ -327,7 +339,23 @@ fn scan_collection(
                     && known.inode == inode_of(&metadata)
             });
         let file_entry = match previous {
-            Some(known) => known.clone(),
+            Some(known) if !known.racy => known.clone(),
+            Some(known) => match fs::read(&path) {
+                Ok(bytes) if unchanged_bytes(known, &bytes) => {
+                    let mut kept = known.clone();
+                    stamp(&mut kept, &metadata);
+                    kept
+                }
+                Ok(bytes) => {
+                    changed.push(name.clone());
+                    file_entry(&path, stem, &meta, validator.as_ref(), &bytes, &metadata)
+                }
+                Err(source) if source.kind() == ErrorKind::NotFound => continue,
+                Err(_) => {
+                    changed.push(name.clone());
+                    unread_entry(&path, stem, UNREADABLE_REASON, Some(&metadata))
+                }
+            },
             None => {
                 let Some(read) =
                     read_entry(&path, stem, &meta, validator.as_ref(), &metadata, limit)

@@ -13,6 +13,7 @@ use crate::snapshot::{Outcome, Snapshot};
 use crate::store::STATE_DIR;
 
 const LISTED: usize = 10;
+const LISTED_GROUPS: usize = 20;
 const SCHEMA_REASON: &str = "schema";
 
 pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
@@ -32,6 +33,7 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
         Ok(snapshot) => {
             checks.extend(document_checks(&snapshot));
             checks.push(skipped_files_check(&snapshot));
+            checks.push(unique_duplicates_check(&snapshot));
             checks.push(cache_check(root, &snapshot));
         }
         Err(error) => checks.push(
@@ -194,6 +196,45 @@ fn skipped_files_check(snapshot: &Snapshot) -> Check {
     )
     .with_details(json!({ "collections": collections }))
     .with_fix("rename or remove the files; a document file is <id>.<json|yaml|md>")
+}
+
+fn unique_duplicates_check(snapshot: &Snapshot) -> Check {
+    let mut groups = Vec::new();
+    for (db, db_snapshot) in snapshot.dbs.iter() {
+        for (collection, collection_snapshot) in db_snapshot.collections.iter() {
+            for (field, value, ids) in collection_snapshot.indexes.all_duplicates() {
+                groups.push(json!({
+                    "db": db,
+                    "collection": collection,
+                    "field": field,
+                    "value": value,
+                    "ids": ids,
+                }));
+            }
+        }
+    }
+    if groups.is_empty() {
+        return Check::ok(
+            Group::Store,
+            "store_unique_duplicates",
+            "every value under a unique index is held by one document",
+        )
+        .with_details(json!({ "groups": [] }));
+    }
+    let total = groups.len();
+    let more = total.saturating_sub(LISTED_GROUPS);
+    groups.truncate(LISTED_GROUPS);
+    let mut details = json!({ "groups": groups });
+    if more > 0 {
+        details["more"] = json!(more);
+    }
+    Check::error(
+        Group::Store,
+        "store_unique_duplicates",
+        format!("{total} values under unique indexes are held by more than one document"),
+    )
+    .with_details(details)
+    .with_fix("change or remove all but one document of each group listed in details")
 }
 
 fn problem_check(id: &'static str, found: &[String], what: &str, fix: &str) -> Check {

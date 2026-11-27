@@ -35,6 +35,7 @@ pub struct FileEntry {
     pub size: u64,
     pub mtime_ns: i128,
     pub inode: u64,
+    pub racy: bool,
     pub outcome: Outcome,
 }
 

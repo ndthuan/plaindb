@@ -609,3 +609,105 @@ fn a_scan_over_the_time_limit_fails_but_an_indexed_lookup_does_not() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::LimitExceeded);
 }
+
+fn duplicate_warnings(store: &Store) -> Vec<Value> {
+    store
+        .status()
+        .unwrap()
+        .warnings
+        .into_iter()
+        .filter(|warning| warning.code == "unique_duplicates")
+        .map(|warning| warning.details)
+        .collect()
+}
+
+fn duplicates_check(store: &Store) -> plaindb_core::Check {
+    store
+        .doctor(plaindb_core::DoctorOptions { offline: true })
+        .checks
+        .into_iter()
+        .find(|check| check.id == "store_unique_duplicates")
+        .expect("the check is always reported")
+}
+
+#[test]
+fn a_hand_copied_duplicate_under_a_unique_index_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), &["people"]);
+    store
+        .set_indexes("main", "people", vec![unique("email")])
+        .unwrap();
+    store
+        .apply(Tx::new(vec![insert(
+            "people",
+            "a",
+            json!({"email": "a@example.com"}),
+        )]))
+        .unwrap();
+    assert!(duplicate_warnings(&store).is_empty());
+    assert_eq!(
+        duplicates_check(&store).status,
+        plaindb_core::CheckStatus::Ok
+    );
+    let folder = dir.path().join("main/people");
+    let copied = fs::read_to_string(folder.join("a.json"))
+        .unwrap()
+        .replace("\"a\"", "\"b\"");
+    fs::write(folder.join("b.json"), copied).unwrap();
+    store.rescan().unwrap();
+    assert_eq!(
+        duplicate_warnings(&store),
+        [json!({"field": "email", "value": "a@example.com", "ids": ["a", "b"]})]
+    );
+    let check = duplicates_check(&store);
+    assert_eq!(check.status, plaindb_core::CheckStatus::Error);
+    assert_eq!(
+        check.details["groups"],
+        json!([{
+            "db": "main",
+            "collection": "people",
+            "field": "email",
+            "value": "a@example.com",
+            "ids": ["a", "b"],
+        }])
+    );
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("change or remove all but one document of each group listed in details")
+    );
+    let status = store.status().unwrap();
+    let warning = status
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "unique_duplicates")
+        .unwrap();
+    assert_eq!(warning.path, folder);
+    fs::remove_file(folder.join("b.json")).unwrap();
+    store.rescan().unwrap();
+    assert!(duplicate_warnings(&store).is_empty());
+    assert_eq!(
+        duplicates_check(&store).status,
+        plaindb_core::CheckStatus::Ok
+    );
+}
+
+#[test]
+fn an_explicit_null_is_a_value_under_a_unique_index_and_a_missing_field_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path(), &["people"]);
+    store
+        .set_indexes("main", "people", vec![unique("email")])
+        .unwrap();
+    let folder = dir.path().join("main/people");
+    fs::write(folder.join("m1.json"), "{}").unwrap();
+    fs::write(folder.join("m2.json"), "{}").unwrap();
+    store.rescan().unwrap();
+    assert!(duplicate_warnings(&store).is_empty());
+    fs::write(folder.join("z1.json"), "{\"email\": null}").unwrap();
+    fs::write(folder.join("z2.json"), "{\"email\": null}").unwrap();
+    store.rescan().unwrap();
+    assert_eq!(
+        duplicate_warnings(&store),
+        [json!({"field": "email", "value": null, "ids": ["z1", "z2"]})]
+    );
+}

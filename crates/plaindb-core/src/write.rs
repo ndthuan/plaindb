@@ -724,6 +724,7 @@ impl Store {
                         size: 0,
                         mtime_ns: 0,
                         inode: 0,
+                        racy: false,
                         outcome: Outcome::Doc(DocEntry {
                             version: pending.version.clone(),
                             doc: pending.doc.clone(),

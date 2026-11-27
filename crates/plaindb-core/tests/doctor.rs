@@ -24,6 +24,7 @@ fn a_healthy_store_reports_stable_check_ids_and_no_error() {
         "documents_schema",
         "names_case",
         "store_skipped_files",
+        "store_unique_duplicates",
         "index_cache",
         "filesystem_network",
         "filesystem_case",

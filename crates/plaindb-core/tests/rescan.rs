@@ -423,3 +423,54 @@ fn skipped_entries_are_counted_per_collection() {
         1
     );
 }
+
+fn rewrite_keeping_stamp(path: &Path, text: &str) {
+    let before = fs::metadata(path).unwrap();
+    assert_eq!(before.len(), u64::try_from(text.len()).unwrap());
+    fs::write(path, text).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+}
+
+#[test]
+fn a_same_size_edit_within_the_same_tick_is_seen() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = json_store(temp.path());
+    let path = users(temp.path()).join("bob.json");
+    fs::write(&path, "{\"name\": \"Bob\"}").unwrap();
+    store.rescan().unwrap();
+    assert_eq!(
+        store.get("main", "users", "bob").unwrap().unwrap().0["name"],
+        json!("Bob")
+    );
+    rewrite_keeping_stamp(&path, "{\"name\": \"Rob\"}");
+    store.rescan().unwrap();
+    assert_eq!(
+        store.get("main", "users", "bob").unwrap().unwrap().0["name"],
+        json!("Rob")
+    );
+}
+
+#[test]
+fn a_same_size_edit_is_seen_through_the_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    drop(json_store(temp.path()));
+    let path = users(temp.path()).join("bob.json");
+    fs::write(&path, "{\"name\": \"Bob\"}").unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store.get("main", "users", "bob").unwrap().unwrap().0["name"],
+        json!("Bob")
+    );
+    drop(store);
+    rewrite_keeping_stamp(&path, "{\"name\": \"Rob\"}");
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store.get("main", "users", "bob").unwrap().unwrap().0["name"],
+        json!("Rob")
+    );
+}

@@ -105,6 +105,8 @@ pub(crate) fn child_directories(
 
 pub const UNKNOWN_SETTING_WARNING: &str = "unknown_setting";
 pub const SKIPPED_FILES_WARNING: &str = "skipped_files";
+pub const UNIQUE_DUPLICATES_WARNING: &str = "unique_duplicates";
+const LISTED_DUPLICATES: usize = 20;
 
 pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     let bytes = match fs::read(root.join(STORE_FILE)) {
@@ -595,6 +597,28 @@ impl Store {
         }
         for (db, db_snapshot) in snapshot.dbs.iter() {
             for (collection, collection_snapshot) in db_snapshot.collections.iter() {
+                let duplicates = collection_snapshot.indexes.all_duplicates();
+                let more = duplicates.len().saturating_sub(LISTED_DUPLICATES);
+                let listed = duplicates.len().min(LISTED_DUPLICATES);
+                for (position, (field, value, ids)) in
+                    duplicates.into_iter().take(LISTED_DUPLICATES).enumerate()
+                {
+                    let mut details = serde_json::json!({
+                        "field": field,
+                        "value": value,
+                        "ids": ids,
+                    });
+                    if more > 0 && position + 1 == listed {
+                        details["more"] = serde_json::json!(more);
+                    }
+                    status.warnings.push(Warning {
+                        code: UNIQUE_DUPLICATES_WARNING.to_owned(),
+                        db: db.clone(),
+                        collection: collection.clone(),
+                        path: self.root.join(db).join(collection),
+                        details,
+                    });
+                }
                 if collection_snapshot.skipped_count > 0 {
                     status.warnings.push(Warning {
                         code: SKIPPED_FILES_WARNING.to_owned(),

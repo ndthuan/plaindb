@@ -22,7 +22,7 @@ use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 
 pub const CACHE_FILE: &str = "index-cache.bin";
 const CACHE_FORMAT: u32 = 2;
-pub const DECODER_REVISION: u32 = 4;
+pub const DECODER_REVISION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -61,6 +61,7 @@ struct FileRef<'a> {
     size: u64,
     mtime_ns: i64,
     inode: u64,
+    racy: bool,
     outcome: OutcomeRef<'a>,
 }
 
@@ -99,6 +100,7 @@ struct FileOwned {
     size: u64,
     mtime_ns: i64,
     inode: u64,
+    racy: bool,
     outcome: OutcomeOwned,
 }
 
@@ -334,6 +336,7 @@ fn file_entry(file: FileOwned, dir: &Path) -> FileEntry {
         size: file.size,
         mtime_ns: i128::from(file.mtime_ns),
         inode: file.inode,
+        racy: file.racy,
         outcome,
     }
 }
@@ -356,6 +359,7 @@ fn file_ref<'a>(name: &'a str, entry: &'a FileEntry) -> FileRef<'a> {
         size: entry.size,
         mtime_ns: i64::try_from(entry.mtime_ns).unwrap_or(0),
         inode: entry.inode,
+        racy: entry.racy,
         outcome,
     }
 }
@@ -450,6 +454,7 @@ fn same_entry(left: &FileEntry, right: &FileEntry) -> bool {
     left.size == right.size
         && left.mtime_ns == right.mtime_ns
         && left.inode == right.inode
+        && left.racy == right.racy
         && match (&left.outcome, &right.outcome) {
             (Outcome::Doc(a), Outcome::Doc(b)) => Arc::ptr_eq(&a.doc, &b.doc),
             (Outcome::Invalid(a), Outcome::Invalid(b)) => a == b,
