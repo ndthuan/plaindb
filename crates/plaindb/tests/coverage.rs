@@ -44,6 +44,10 @@ const TABLE: &[Coverage] = &[
     covered("patch", &["patch"], &["plaindb_patch"]),
     covered("delete", &["delete"], &["plaindb_delete"]),
     covered("tx", &["tx"], &["plaindb_tx"]),
+    covered("put_file", &["file put"], &[]),
+    covered("get_file", &["file get"], &[]),
+    covered("list_files", &["file list"], &[]),
+    covered("delete_file", &["file rm"], &[]),
     covered("create_db", &["db create"], &["plaindb_create_db"]),
     covered("drop_db", &["db drop"], &["plaindb_drop_db"]),
     covered(

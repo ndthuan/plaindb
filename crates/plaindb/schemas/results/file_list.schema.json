@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "file_list",
+  "type": "object",
+  "properties": {
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "mime": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "size",
+          "sha256",
+          "mime"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "files"
+  ],
+  "additionalProperties": false
+}

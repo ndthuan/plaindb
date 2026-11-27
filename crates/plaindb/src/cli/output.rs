@@ -10,6 +10,7 @@ pub enum Human {
     Pretty,
     Lines(Vec<String>),
     Text(String),
+    Bytes(Vec<u8>),
     Streamed,
 }
 
@@ -52,6 +53,16 @@ impl Output {
         Self {
             result: Value::Null,
             human: Human::Streamed,
+            exit_code: 0,
+            warnings: Vec::new(),
+            failure: None,
+        }
+    }
+
+    pub fn bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            result: Value::Null,
+            human: Human::Bytes(bytes),
             exit_code: 0,
             warnings: Vec::new(),
             failure: None,
@@ -153,6 +164,10 @@ pub fn print_success(json: bool, output: &Output) -> io::Result<()> {
             }
         }
         Human::Text(text) => write_line(&mut stdout, text)?,
+        Human::Bytes(bytes) => {
+            stdout.write_all(bytes)?;
+            stdout.flush()?;
+        }
         Human::Streamed => {}
     }
     drop(stdout);

@@ -136,7 +136,7 @@ fn read_doc(source: &DocumentSource) -> Result<Doc> {
     }
 }
 
-fn write_output(result: &TxResult) -> Output {
+pub fn write_output(result: &TxResult) -> Output {
     let results: Vec<Value> = result
         .results
         .iter()
@@ -170,10 +170,12 @@ fn write_output(result: &TxResult) -> Output {
     }
 }
 
+pub fn apply_tx(context: &Context, ops: Vec<Op>) -> Result<TxResult> {
+    context.open()?.apply(context.transaction(ops))
+}
+
 pub fn apply(context: &Context, ops: Vec<Op>) -> Result<Output> {
-    let store = context.open()?;
-    let result = store.apply(context.transaction(ops))?;
-    Ok(write_output(&result))
+    Ok(write_output(&apply_tx(context, ops)?))
 }
 
 pub fn insert(context: &Context, args: &InsertArgs) -> Result<Output> {

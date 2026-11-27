@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "file_put",
+  "type": "object",
+  "properties": {
+    "tx_id": {
+      "type": "string"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "previous_version"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "push": {
+      "enum": [
+        "ok",
+        "failed",
+        "remote_ahead",
+        "deferred",
+        "git_not_found",
+        "scheduled"
+      ]
+    },
+    "deferred": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "enum": [
+            "files",
+            "git",
+            "finish"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "file": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mime": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "size",
+        "sha256",
+        "mime"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "tx_id",
+    "results",
+    "file"
+  ],
+  "additionalProperties": false
+}

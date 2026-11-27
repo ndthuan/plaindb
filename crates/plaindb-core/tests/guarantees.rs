@@ -13,6 +13,7 @@ const TABLE: &[Row] = &[
         tests: &[
             "writes::a_failing_op_leaves_every_file_unchanged",
             "crash::a_crash_after_any_number_of_files_rolls_forward_on_open",
+            "files::a_failing_transaction_attaches_nothing",
         ],
     },
     Row {
@@ -23,6 +24,7 @@ const TABLE: &[Row] = &[
             "crash::a_crash_at_any_checkpoint_step_loses_nothing",
             "git_commit::a_crash_after_the_commit_is_not_committed_twice",
             "soak::writers_killed_at_random_lose_no_commit_and_no_hand_edit",
+            "crash::a_crash_while_attaching_leaves_the_file_and_its_entry_after_reopen",
         ],
     },
     Row {
@@ -30,6 +32,7 @@ const TABLE: &[Row] = &[
         tests: &[
             "multiprocess::four_processes_inserting_at_once_lose_nothing",
             "multiprocess::two_processes_patching_one_document_never_both_win",
+            "multiprocess::two_processes_attaching_files_at_once_lose_nothing",
         ],
     },
     Row {
@@ -46,6 +49,7 @@ const TABLE: &[Row] = &[
             "writes::a_file_created_by_hand_after_open_is_not_overwritten",
             "crash::a_hand_edit_after_the_commit_survives_the_replay",
             "crash::a_file_removed_by_hand_after_the_commit_stays_removed",
+            "files::a_hand_edited_file_is_not_overwritten",
         ],
     },
     Row {
@@ -55,6 +59,8 @@ const TABLE: &[Row] = &[
             "codec::markdown_body_survives_byte_for_byte",
             "transfer::a_markdown_body_survives_import_and_export_byte_for_byte",
             "git_restore::a_clone_of_the_remote_opens_as_the_same_store",
+            "files::an_attached_file_is_stored_beside_its_document_and_read_back",
+            "git_restore::a_clone_of_the_remote_holds_the_same_attached_files",
         ],
     },
     Row {

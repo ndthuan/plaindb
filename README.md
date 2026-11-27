@@ -6,6 +6,7 @@ plaindb is a document database whose data is plain text files. Every document is
 
 - **Plain files.** Every document is one JSON, YAML or Markdown file that you can read, edit and diff with ordinary tools.
 - **Hand edits are safe.** plaindb notices a file changed by hand and never overwrites it: a write that would fails with `version_conflict`.
+- **Attached files.** Images, PDFs and other binary files sit beside their document as ordinary files, written in the same transaction and commit.
 - **Transactions.** Several documents change together or not at all, with `--if-version` checks, and several processes share one store.
 - **Crash safe.** A crash never leaves half a transaction, and the durability level sets what a power loss can lose.
 - **Queries and indexes.** Filters, sorting, paging and field selection, with field, unique and text indexes.

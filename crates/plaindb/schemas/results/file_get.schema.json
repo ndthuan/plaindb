@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "file_get",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mime": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "size",
+    "sha256",
+    "mime"
+  ],
+  "additionalProperties": false
+}

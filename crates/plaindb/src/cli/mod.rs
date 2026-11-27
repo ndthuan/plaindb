@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod doctor;
+pub mod file;
 pub mod git;
 pub mod output;
 pub mod read;
@@ -75,6 +76,8 @@ pub enum Command {
     Delete(write::DeleteArgs),
     #[command(about = "Apply a list of operations as one atomic transaction")]
     Tx(write::TxArgs),
+    #[command(subcommand, about = "Files attached to a document")]
+    File(FileCommand),
     #[command(subcommand, about = "Version control of the store")]
     Git(GitCommand),
     #[command(about = "Commit the pending changes")]
@@ -107,6 +110,18 @@ pub enum ConfigCommand {
     Get(admin::ConfigGetArgs),
     #[command(about = "Change a setting; an empty value clears a limit")]
     Set(admin::ConfigSetArgs),
+}
+
+#[derive(Subcommand)]
+pub enum FileCommand {
+    #[command(about = "Attach a file to a document, replacing one of the same name")]
+    Put(file::FilePutArgs),
+    #[command(about = "Read an attached file")]
+    Get(file::FileGetArgs),
+    #[command(about = "List the files attached to a document")]
+    List(file::FileListArgs),
+    #[command(about = "Remove an attached file")]
+    Rm(file::FileRmArgs),
 }
 
 #[derive(Subcommand)]
@@ -198,7 +213,7 @@ pub fn parse_json(code: ErrorCode, what: &str, text: &str) -> Result<Value> {
     serde_json::from_str(text).map_err(|source| bad_json(code, what, &source))
 }
 
-fn run(context: &Context, command: Command) -> Result<Output> {
+fn run(context: &Context, command: Command, json: bool) -> Result<Output> {
     match command {
         Command::Get(args) => read::get(&context.open_reader()?, &args),
         Command::Find(args) => read::find(&context.open_reader()?, &args),
@@ -227,6 +242,10 @@ fn run(context: &Context, command: Command) -> Result<Output> {
         Command::Patch(args) => write::patch(context, &args),
         Command::Delete(args) => write::delete(context, &args),
         Command::Tx(args) => write::transaction(context, &args),
+        Command::File(FileCommand::Put(args)) => file::put(context, &args),
+        Command::File(FileCommand::Get(args)) => file::get(context, &args, json),
+        Command::File(FileCommand::List(args)) => file::list(context, &args),
+        Command::File(FileCommand::Rm(args)) => file::rm(context, &args),
         Command::Git(GitCommand::Enable) => git::enable(&context.open()?),
         Command::Git(GitCommand::Remote(RemoteCommand::Set(args))) => {
             git::set_remote(&context.open()?, &args)
@@ -267,7 +286,7 @@ pub fn execute(cli: Cli) -> ExitCode {
     };
     tracing::debug!(store = %context.store.display(), "running a command");
     let json = cli.json && !matches!(cli.command, Command::Mcp(_));
-    match run(&context, cli.command) {
+    match run(&context, cli.command, json) {
         Ok(output) => exit_after(print_success(json, &output), output.exit_code),
         Err(error) => exit_after(print_failure(json, &error), 1),
     }

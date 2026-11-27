@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "file_rm",
+  "type": "object",
+  "properties": {
+    "tx_id": {
+      "type": "string"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "previous_version"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "push": {
+      "enum": [
+        "ok",
+        "failed",
+        "remote_ahead",
+        "deferred",
+        "git_not_found",
+        "scheduled"
+      ]
+    },
+    "deferred": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "enum": [
+            "files",
+            "git",
+            "finish"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "tx_id",
+    "results"
+  ],
+  "additionalProperties": false
+}
