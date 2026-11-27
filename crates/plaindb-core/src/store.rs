@@ -432,6 +432,17 @@ impl Store {
                 }),
             });
         }
+        if status.git.enabled && !git::has_repository(&self.root) {
+            status.warnings.push(Warning {
+                code: git::GIT_REPOSITORY_MISSING_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.clone(),
+                details: serde_json::json!({
+                    "message": "git is on but the store has no .git directory",
+                }),
+            });
+        }
         if read_config(&self.root)?.git_binary.is_some() {
             status.warnings.push(Warning {
                 code: git::GIT_BINARY_IGNORED_WARNING.to_owned(),

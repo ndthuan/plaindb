@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -7,6 +8,23 @@ use std::time::{Duration, Instant};
 use crate::hooks;
 
 pub const GIT_BINARY_ENV: &str = "PLAINDB_GIT";
+const REPOSITORY_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
 const FAILING_ASKPASS: &str = "false";
 const BATCH_SSH: &str = "ssh -o BatchMode=yes";
 
@@ -75,7 +93,7 @@ fn ssh_is_configured(root: &Path) -> bool {
         .into_iter()
         .any(|name| non_empty(std::env::var(name).ok()).is_some());
     env_set
-        || gix::open(root).is_ok_and(|repo| {
+        || super::open(root).is_ok_and(|repo| {
             repo.config_snapshot()
                 .string("core.sshCommand")
                 .is_some_and(|value| !value.to_string().trim().is_empty())
@@ -92,11 +110,25 @@ fn drain(mut pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Str
     })
 }
 
-fn command(program: &str, root: &Path, args: &[&str]) -> Command {
+fn command(program: &str, root: &Path, args: &[&str]) -> std::io::Result<Command> {
+    let root = std::path::absolute(root)?;
+    let mut git_dir = OsString::from("--git-dir=");
+    git_dir.push(root.join(".git"));
+    let mut work_tree = OsString::from("--work-tree=");
+    work_tree.push(&root);
     let mut command = Command::new(program);
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if name.starts_with("GIT_CONFIG_KEY_") || name.starts_with("GIT_CONFIG_VALUE_") {
+            command.env_remove(name.as_ref());
+        }
+    }
     command
-        .arg("-C")
-        .arg(root)
+        .arg(git_dir)
+        .arg(work_tree)
         .args(args)
         .env("LC_ALL", "C")
         .env("LANGUAGE", "")
@@ -107,10 +139,10 @@ fn command(program: &str, root: &Path, args: &[&str]) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if !ssh_is_configured(root) {
+    if !ssh_is_configured(&root) {
         command.env("GIT_SSH_COMMAND", BATCH_SSH);
     }
-    command
+    Ok(command)
 }
 
 pub(crate) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io::Result<GitRun> {
@@ -118,7 +150,7 @@ pub(crate) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io:
     if !is_allowed(&binary) {
         return Err(ErrorKind::NotFound.into());
     }
-    let mut child = command(&binary.program, root, args).spawn()?;
+    let mut child = command(&binary.program, root, args)?.spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;

@@ -7,7 +7,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::command::{rejected_as_behind, run_git};
-use super::{git_disabled, git_error, head_id, open, read_optional, state_file};
+use super::{
+    git_disabled, git_error, has_repository, head_id, open, read_optional, repository_missing,
+    state_file,
+};
 use crate::atomic::{ensure_dir, replace_unsynced};
 use crate::config::{Durability, validate_remote_url};
 use crate::config::{PushMode, StoreConfig, to_file_bytes};
@@ -142,7 +145,7 @@ pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<File>> {
 }
 
 pub(crate) fn current_head(root: &Path) -> Result<Option<String>> {
-    if !root.join(".git").exists() {
+    if !has_repository(root) {
         return Ok(None);
     }
     Ok(head_id(&open(root)?)?.map(|id| id.to_string()))
@@ -161,6 +164,9 @@ fn push_until_stable(root: &Path, config: &StoreConfig) -> Result<Option<String>
 fn run(root: &Path, config: &StoreConfig) -> Result<PushOutcome> {
     if !config.git {
         return Err(git_disabled());
+    }
+    if !has_repository(root) {
+        return Err(repository_missing());
     }
     if read_state(root)?.remote_ahead {
         return Err(remote_ahead_error());
@@ -275,6 +281,9 @@ impl Store {
         let config = read_config(&self.root)?;
         if !config.git {
             return Err(git_disabled());
+        }
+        if !has_repository(&self.root) {
+            return Err(repository_missing());
         }
         let known = run_git(
             &self.root,

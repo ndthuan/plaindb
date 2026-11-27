@@ -44,6 +44,7 @@ pub const WARNINGS_FILE: &str = "warnings.json";
 pub const FOREIGN_COMMIT_WARNING: &str = "foreign_commit";
 pub const GIT_NOT_FOUND_WARNING: &str = "git_not_found";
 pub const GIT_BINARY_IGNORED_WARNING: &str = "git_binary_ignored";
+pub const GIT_REPOSITORY_MISSING_WARNING: &str = "git_repository_missing";
 const GIT_DIR: &str = ".git";
 const FALLBACK_NAME: &str = "plaindb";
 const FALLBACK_EMAIL: &str = "plaindb@localhost";
@@ -92,8 +93,53 @@ pub(crate) fn git_disabled() -> Error {
     Error::new(ErrorCode::GitDisabled, "git is not enabled for this store")
 }
 
+pub(crate) fn repository_missing() -> Error {
+    Error::new(
+        ErrorCode::GitDisabled,
+        "git is on but the store has no .git directory",
+    )
+    .with_detail("reason", "repository_missing")
+}
+
+pub(crate) fn has_repository(root: &Path) -> bool {
+    root.join(GIT_DIR).is_dir()
+}
+
+fn is_true(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn open_options() -> gix::open::Options {
+    let mut permissions = gix::open::Permissions::default();
+    permissions.env.git_prefix = gix::sec::Permission::Deny;
+    permissions.env.objects = gix::sec::Permission::Deny;
+    permissions.config.env = false;
+    let mut options = gix::open::Options::default();
+    if std::env::var("GIT_CONFIG_NOSYSTEM").is_ok_and(|value| is_true(&value)) {
+        permissions.config.system = false;
+    } else if let Some(path) = std::env::var_os("GIT_CONFIG_SYSTEM").filter(|path| !path.is_empty())
+    {
+        options = options.system_config_path(path);
+    }
+    if let Some(path) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        permissions.config.user = false;
+        permissions.config.git = false;
+        if !path.is_empty() {
+            permissions.config.git_binary = true;
+            options = options.git_installation_config_path(path);
+        }
+    }
+    options.permissions(permissions)
+}
+
 pub(crate) fn open(root: &Path) -> Result<gix::Repository> {
-    gix::open(root).map_err(git_error)
+    if !has_repository(root) {
+        return Err(repository_missing());
+    }
+    gix::open_opts(root, open_options()).map_err(git_error)
 }
 
 pub(crate) fn head_id(repo: &gix::Repository) -> Result<Option<ObjectId>> {
@@ -243,7 +289,14 @@ fn init_repo(root: &Path, branch: &str) -> Result<()> {
 
     let branch_ref = FullName::try_from(format!("refs/heads/{branch}"))
         .map_err(|_| Error::invalid_name("branch", branch))?;
-    let repo = gix::init(root).map_err(git_error)?;
+    let repo: gix::Repository = gix::ThreadSafeRepository::init_opts(
+        root,
+        gix::create::Kind::WithWorktree,
+        gix::create::Options::default(),
+        open_options(),
+    )
+    .map_err(git_error)?
+    .into();
     let signature = signature(&repo);
     let mut time = gix::date::parse::TimeBuf::default();
     let edit = RefEdit {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::command::run_git;
 use super::push::{directory_bytes, truncated, try_lock_file};
-use super::{git_disabled, read_optional, state_file};
+use super::{git_disabled, has_repository, read_optional, repository_missing, state_file};
 use crate::atomic::replace_unsynced;
 use crate::config::to_file_bytes;
 use crate::error::Result;
@@ -146,8 +146,11 @@ fn collect(root: &Path, auto: bool) -> Result<GcReport> {
 impl Store {
     pub fn gc(&self) -> Result<GcReport> {
         let config = read_config(&self.root)?;
-        if !config.git || !self.root.join(".git").exists() {
+        if !config.git {
             return Err(git_disabled());
+        }
+        if !has_repository(&self.root) {
+            return Err(repository_missing());
         }
         collect(&self.root, false)
     }
