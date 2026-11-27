@@ -6,9 +6,11 @@ Git is optional. With it on, every transaction becomes one commit, or in manual 
 To back a store up:
 
 1. Turn git on and set a remote with `plaindb git remote set <url>`. The remote is a plain git remote, so it can be a hosted repository or a bare repository on another disk.
-2. Run `plaindb config set push on-commit`. After each commit the store runs `git push <remote> <branch>` with a 60 second limit and up to three attempts. It never forces a push.
-3. A failed push never fails the write. The commit stays local, and the status reports the number of unpushed commits and the last error. The next commit, or an explicit `plaindb push`, tries again.
+2. Run `plaindb config set push on-commit`. After each commit the store pushes the branch with one attempt of at most 10 seconds. It never forces a push. A store whose remote has no URL starts no push and the write reports no push outcome.
+3. A failed push never fails the write. The commit stays local, and the status reports the number of unpushed commits and the last error. After a failure the push after a write waits 30 seconds, doubling with each further failure up to one hour; a write in that window reports `deferred` and starts no git process. `plaindb push`, and the MCP push tool, ignore the wait and make up to three attempts of at most 60 seconds each; a success ends the wait.
 4. A push refused because the remote holds commits the store lacks marks the remote as ahead and stops pushing until a person has merged the remote into the store's repository with git and run `plaindb push --reset-remote-ahead`.
+
+Each git process runs in its own process group: when it outlives its limit the whole group is killed, and a child it left behind holding its output delays the store by at most 2 seconds.
 
 The store commits to the branch HEAD points at and pushes the `"branch"` setting, so the two must agree. When HEAD is detached or on another branch, a push sends nothing and fails with `head_off_branch`, a push after a write reports `failed` and records why, the status carries a `head_off_branch` warning and `plaindb doctor` names the `git switch` that fixes it. `plaindb config set branch` on a store with a repository only accepts the checked-out branch: switch with git first.
 

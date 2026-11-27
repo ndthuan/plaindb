@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ const REPOSITORY_ENV: &[&str] = &[
 ];
 const FAILING_ASKPASS: &str = "false";
 const BATCH_SSH: &str = "ssh -o BatchMode=yes";
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Binary {
@@ -100,14 +102,65 @@ fn ssh_is_configured(root: &Path) -> bool {
         })
 }
 
-fn drain(mut pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(pipe) = pipe.as_mut() {
-            let _ = pipe.read_to_end(&mut bytes);
-        }
+struct Drain {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl Drain {
+    fn start(pipe: Option<impl Read + Send + 'static>) -> Self {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (sender, done) = mpsc::channel();
+        let shared = Arc::clone(&bytes);
+        thread::spawn(move || {
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => shared
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .extend_from_slice(&chunk[..read]),
+                    }
+                }
+            }
+            let _ = sender.send(());
+        });
+        Self { bytes, done }
+    }
+
+    fn finish(self, deadline: Instant) -> String {
+        let _ = self
+            .done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let bytes = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8_lossy(&bytes).into_owned()
-    })
+    }
+}
+
+#[cfg(unix)]
+fn own_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_group(child: &mut Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn kill_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn command(program: &str, root: &Path, args: &[&str]) -> std::io::Result<Command> {
@@ -150,21 +203,27 @@ pub(crate) fn run_git(root: &Path, args: &[&str], timeout: Duration) -> std::io:
     if !is_allowed(&binary) {
         return Err(ErrorKind::NotFound.into());
     }
-    let mut child = command(&binary.program, root, args)?.spawn()?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let mut command = command(&binary.program, root, args)?;
+    own_group(&mut command);
+    let mut child = command.spawn()?;
+    let stdout = Drain::start(child.stdout.take());
+    let stderr = Drain::start(child.stderr.take());
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
+            let drained = Instant::now() + PIPE_GRACE;
             return Ok(GitRun {
                 success: status.success(),
-                stdout: stdout.join().unwrap_or_default(),
-                stderr: stderr.join().unwrap_or_default(),
+                stdout: stdout.finish(drained),
+                stderr: stderr.finish(drained),
             });
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_group(&mut child);
             let _ = child.wait();
+            let drained = Instant::now() + PIPE_GRACE;
+            stdout.finish(drained);
+            stderr.finish(drained);
             return Ok(GitRun {
                 success: false,
                 stdout: String::new(),

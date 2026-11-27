@@ -114,6 +114,10 @@ fn settled_push(store: &Store) -> plaindb_core::Result<PushOutcome> {
     store.push()
 }
 
+fn forget_push_failures(store: &Store) {
+    fs::remove_file(store.root().join(".plaindb/push.json")).unwrap();
+}
+
 fn make_remote_ahead(dir: &Path, remote: &Path) {
     let other = dir.join("other");
     git(
@@ -191,6 +195,7 @@ fn an_ssh_remote_that_needs_a_passphrase_fails_fast() {
         "ssh://git@example.com/repo.git",
         Some(&wrapper),
     );
+    forget_push_failures(&store);
     let begun = Instant::now();
     let result = store.apply(put("a", 1)).unwrap();
     assert_eq!(result.push, Some(PushOutcome::Failed));
@@ -219,6 +224,7 @@ fn a_configured_ssh_command_is_left_alone() {
     store.set_remote("ssh://git@example.com/repo.git").unwrap();
     store.set_push(PushMode::OnCommit).unwrap();
     fs::remove_file(&seen).unwrap();
+    forget_push_failures(&store);
     let result = store.apply(put("a", 1)).unwrap();
     assert_eq!(result.push, Some(PushOutcome::Failed));
     let arguments = fs::read_to_string(&seen).unwrap();
@@ -379,4 +385,76 @@ fn no_source_file_spawns_a_program_outside_the_helper() {
         }
     }
     assert_eq!(spawners, ["command.rs"]);
+}
+
+fn group_is_gone(pid_file: &Path) -> bool {
+    let pid: i32 = fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = unsafe { libc::kill(-pid, 0) };
+    alive != 0
+}
+
+#[test]
+fn a_hanging_push_after_a_write_is_cut_off_with_its_whole_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path());
+    let pid_file = dir.path().join("pid");
+    let armed = dir.path().join("armed");
+    let hanging = script(
+        &dir.path().join("wrappers"),
+        "git-hanging",
+        &format!(
+            "case \" $* \" in\n*\" push \"*) if [ -e {} ]; then echo $$ > {}; sleep 30; sleep 30; fi;;\nesac\nexec {} \"$@\"",
+            armed.display(),
+            pid_file.display(),
+            real_git()
+        ),
+    );
+    let store = store_pushing_to(
+        &dir.path().join("store"),
+        remote.to_str().unwrap(),
+        Some(&hanging),
+    );
+    fs::write(&armed, "").unwrap();
+    let begun = Instant::now();
+    let result = store.apply(put("a", 1)).unwrap();
+    assert!(
+        begun.elapsed() < Duration::from_secs(12),
+        "{:?}",
+        begun.elapsed()
+    );
+    assert_eq!(result.push, Some(PushOutcome::Failed));
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(group_is_gone(&pid_file));
+}
+
+#[test]
+fn a_background_child_holding_stderr_does_not_hold_the_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path());
+    let lingering = script(
+        &dir.path().join("wrappers"),
+        "git-lingering",
+        &format!(
+            "case \" $* \" in\n*\" push \"*) sleep 30 & exit 0;;\nesac\nexec {} \"$@\"",
+            real_git()
+        ),
+    );
+    let store = store_pushing_to(
+        &dir.path().join("store"),
+        remote.to_str().unwrap(),
+        Some(&lingering),
+    );
+    store.set_push(PushMode::Off).unwrap();
+    store.apply(put("a", 1)).unwrap();
+    let begun = Instant::now();
+    assert_eq!(store.push().unwrap(), PushOutcome::Ok);
+    assert!(
+        begun.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        begun.elapsed()
+    );
 }

@@ -21,6 +21,9 @@ use crate::write::now_timestamp;
 const PUSH_LOCK_FILE: &str = "push.lock";
 const PUSH_STATE_FILE: &str = "push.json";
 const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+const WRITE_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+const FIRST_RETRY_DELAY_SECS: u64 = 30;
+const MAX_RETRY_DELAY_SECS: u64 = 3_600;
 const ATTEMPTS: u32 = 3;
 const FIRST_BACKOFF: Duration = Duration::from_secs(2);
 const ERROR_CHARS: usize = 500;
@@ -41,6 +44,39 @@ pub(crate) struct PushState {
     pub last_push_at: Option<String>,
     pub last_push_error: Option<String>,
     pub remote_ahead: bool,
+    pub failures: u32,
+    pub next_attempt_at: Option<String>,
+}
+
+impl PushState {
+    fn mark_pushed(&mut self) {
+        self.last_push_at = Some(now_timestamp());
+        self.last_push_error = None;
+        self.failures = 0;
+        self.next_attempt_at = None;
+    }
+
+    fn mark_failed(&mut self, text: String) {
+        self.failures = self.failures.saturating_add(1);
+        let doublings = self.failures.saturating_sub(1).min(16);
+        let delay = FIRST_RETRY_DELAY_SECS
+            .saturating_mul(1 << doublings)
+            .min(MAX_RETRY_DELAY_SECS);
+        let at = jiff::Timestamp::now()
+            .checked_add(jiff::SignedDuration::from_secs(
+                i64::try_from(delay).unwrap_or(i64::MAX),
+            ))
+            .unwrap_or(jiff::Timestamp::MAX);
+        self.next_attempt_at = Some(format!("{at:.3}"));
+        self.last_push_error = Some(text);
+    }
+
+    fn waits(&self) -> bool {
+        self.next_attempt_at
+            .as_deref()
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .is_some_and(|at| at > jiff::Timestamp::now())
+    }
 }
 
 pub(crate) fn read_state(root: &Path) -> Result<PushState> {
@@ -117,12 +153,12 @@ enum Attempt {
     Failed(String),
 }
 
-fn attempt(root: &Path, config: &StoreConfig) -> Attempt {
+fn attempt(root: &Path, config: &StoreConfig, timeout: Duration) -> Attempt {
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", config.branch);
     match run_git(
         root,
         &["push", "--porcelain", "--", &config.remote, &refspec],
-        PUSH_TIMEOUT,
+        timeout,
     ) {
         Ok(run) if run.success => Attempt::Pushed,
         Ok(run) if rejected_as_behind(&run.stdout) => Attempt::Rejected(truncated(&run.stderr)),
@@ -137,10 +173,9 @@ fn push_with_retries(root: &Path, config: &StoreConfig) -> Result<()> {
     let mut backoff = FIRST_BACKOFF;
     let mut failure = String::new();
     for round in 0..ATTEMPTS {
-        match attempt(root, config) {
+        match attempt(root, config, PUSH_TIMEOUT) {
             Attempt::Pushed => {
-                state.last_push_at = Some(now_timestamp());
-                state.last_push_error = None;
+                state.mark_pushed();
                 return write_state(root, &state);
             }
             Attempt::Rejected(text) => {
@@ -294,6 +329,73 @@ pub(crate) fn directory_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
+fn push_once(root: &Path, config: &StoreConfig) -> Result<PushOutcome> {
+    let mut state = read_state(root)?;
+    if state.waits() {
+        return Ok(PushOutcome::Deferred);
+    }
+    match attempt(root, config, WRITE_PUSH_TIMEOUT) {
+        Attempt::Pushed => {
+            state.mark_pushed();
+            write_state(root, &state)?;
+            Ok(PushOutcome::Ok)
+        }
+        Attempt::Rejected(text) => {
+            state.remote_ahead = true;
+            state.last_push_error = Some(text);
+            write_state(root, &state)?;
+            Ok(PushOutcome::RemoteAhead)
+        }
+        Attempt::Missing => {
+            state.last_push_error = Some(ErrorCode::GitNotFound.as_str().to_owned());
+            write_state(root, &state)?;
+            Ok(PushOutcome::GitNotFound)
+        }
+        Attempt::Failed(text) => {
+            state.mark_failed(text);
+            write_state(root, &state)?;
+            Ok(PushOutcome::Failed)
+        }
+    }
+}
+
+pub(crate) fn push_after_write(root: &Path, config: &StoreConfig) -> Result<Option<PushOutcome>> {
+    if !has_repository(root) || remote_url(root, &config.remote)?.is_none() {
+        return Ok(None);
+    }
+    if read_state(root)?.remote_ahead {
+        return Ok(Some(PushOutcome::RemoteAhead));
+    }
+    if check_head_branch(root, config).is_err() {
+        return Ok(Some(PushOutcome::Failed));
+    }
+    let mut pushed_any = false;
+    loop {
+        let Some(lock) = try_lock_file(root, PUSH_LOCK_FILE)? else {
+            return Ok(Some(if pushed_any {
+                PushOutcome::Ok
+            } else {
+                PushOutcome::Deferred
+            }));
+        };
+        let pushed = loop {
+            let head = current_head(root)?;
+            let outcome = push_once(root, config)?;
+            if outcome != PushOutcome::Ok {
+                return Ok(Some(outcome));
+            }
+            if current_head(root)? == head {
+                break head;
+            }
+        };
+        drop(lock);
+        pushed_any = true;
+        if current_head(root)? == pushed {
+            return Ok(Some(PushOutcome::Ok));
+        }
+    }
+}
+
 impl Store {
     pub(crate) fn push_head(&self) -> Option<String> {
         let config = read_config(&self.root).ok()?;
@@ -312,12 +414,7 @@ impl Store {
         if before.as_deref() == Some(after.as_str()) {
             return None;
         }
-        Some(match run(&self.root, &config) {
-            Ok(outcome) => outcome,
-            Err(error) if error.code == ErrorCode::RemoteAhead => PushOutcome::RemoteAhead,
-            Err(error) if error.code == ErrorCode::GitNotFound => PushOutcome::GitNotFound,
-            Err(_) => PushOutcome::Failed,
-        })
+        push_after_write(&self.root, &config).unwrap_or(Some(PushOutcome::Failed))
     }
 
     pub(crate) fn push_guard(&self) -> PushGuard<'_> {

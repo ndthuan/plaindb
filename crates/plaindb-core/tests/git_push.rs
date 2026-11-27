@@ -217,7 +217,7 @@ fn an_unreachable_remote_never_fails_a_write() {
     assert_eq!(store.get("main", "items", "b").unwrap().unwrap().0["n"], 2);
 
     let second = pushed(&store, "c", 3);
-    assert_eq!(second.push, Some(PushOutcome::Failed));
+    assert_eq!(second.push, Some(PushOutcome::Deferred));
     let after_second = store.status().unwrap().git;
     assert_eq!(after_second.unpushed, after_first.unpushed + 1);
 
@@ -630,4 +630,108 @@ fn the_branch_setting_is_free_before_git_is_on() {
     let store = Store::init(dir.path().join("store")).unwrap();
     store.set_setting("branch", "backup").unwrap();
     assert_eq!(store.config().branch, "backup");
+}
+
+fn push_state(root: &Path) -> Value {
+    serde_json::from_slice(&fs::read(root.join(".plaindb/push.json")).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+fn dead_remote_store(dir: &Path) -> (Store, PathBuf, PathBuf) {
+    let remote = bare_remote(dir, "remote.git");
+    let root = dir.join("store");
+    let store = pushing_store(&root, &remote);
+    pushed(&store, "seed", 0);
+    store
+        .set_remote(dir.join("gone.git").to_str().unwrap())
+        .unwrap();
+    let (recorder, calls) = recording_git(dir);
+    plaindb_core::set_git_program(&root, Some(recorder.to_str().unwrap().to_owned()));
+    (store, remote, calls)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dead_remote_costs_the_writes_after_the_first_failure_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _, calls) = dead_remote_store(dir.path());
+    let begun = std::time::Instant::now();
+    let outcomes: Vec<Option<PushOutcome>> = (0..10)
+        .map(|n| pushed(&store, &format!("d{n}"), n).push)
+        .collect();
+    assert!(begun.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(outcomes[0], Some(PushOutcome::Failed));
+    assert!(
+        outcomes[1..]
+            .iter()
+            .all(|outcome| *outcome == Some(PushOutcome::Deferred)),
+        "{outcomes:?}"
+    );
+    assert_eq!(push_calls(&calls), 1);
+    let status = store.status().unwrap().git;
+    assert!(status.last_push_error.is_some());
+    assert_eq!(status.unpushed, 10);
+    let state = push_state(store.root());
+    assert_eq!(state["failures"], 1);
+    assert!(state["next_attempt_at"].is_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_after_the_backoff_ends_tries_once_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _, calls) = dead_remote_store(dir.path());
+    pushed(&store, "a", 1);
+    assert_eq!(push_calls(&calls), 1);
+    let path = store.root().join(".plaindb/push.json");
+    let mut state = push_state(store.root());
+    state["next_attempt_at"] = json!("2000-01-01T00:00:00.000Z");
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(pushed(&store, "b", 2).push, Some(PushOutcome::Failed));
+    assert_eq!(push_calls(&calls), 2);
+    assert_eq!(push_state(store.root())["failures"], 2);
+    assert_eq!(pushed(&store, "c", 3).push, Some(PushOutcome::Deferred));
+    assert_eq!(push_calls(&calls), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_explicit_push_ignores_the_backoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, remote, calls) = dead_remote_store(dir.path());
+    pushed(&store, "a", 1);
+    assert_eq!(push_calls(&calls), 1);
+    assert!(store.push().is_err());
+    assert_eq!(push_calls(&calls), 4);
+    store.set_remote(remote.to_str().unwrap()).unwrap();
+    assert_eq!(store.push().unwrap(), PushOutcome::Ok);
+    let state = push_state(store.root());
+    assert_eq!(state["failures"], 0);
+    assert_eq!(state["next_attempt_at"], Value::Null);
+    assert_eq!(pushed(&store, "b", 2).push, Some(PushOutcome::Ok));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_without_a_remote_url_starts_no_push_after_a_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let store = Store::init_with(
+        &root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "items", Format::Json)
+        .unwrap();
+    store.set_push(PushMode::OnCommit).unwrap();
+    let (recorder, calls) = recording_git(dir.path());
+    plaindb_core::set_git_program(&root, Some(recorder.to_str().unwrap().to_owned()));
+    assert_eq!(pushed(&store, "a", 1).push, None);
+    assert_eq!(push_calls(&calls), 0);
 }
