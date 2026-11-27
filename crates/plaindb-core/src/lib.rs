@@ -1,5 +1,6 @@
 mod admin;
 pub mod atomic;
+pub mod attachments;
 mod boot;
 pub mod cache;
 pub mod codec;
@@ -27,11 +28,12 @@ pub mod version;
 pub mod write;
 
 pub use atomic::{remove_durable, write_atomic};
+pub use attachments::FileMeta;
 pub use codec::{Codec, Doc, codec_for};
 pub use config::{
     CollectionMeta, CommitMode, DEFAULT_CHECKPOINT_INTERVAL, DEFAULT_GC_EVERY,
-    DEFAULT_LOCK_TIMEOUT_MS, Durability, Format, IndexSpec, Limits, PushMode, STORE_FORMAT,
-    StoreConfig,
+    DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_MAX_FILE_BYTES, Durability, Format, IndexSpec, Limits,
+    PushMode, STORE_FORMAT, StoreConfig,
 };
 pub use doctor::{Check, CheckStatus, DoctorOptions, Group, Report};
 pub use error::{Error, ErrorCode, Result};
@@ -43,7 +45,9 @@ pub use git::{
 pub use hooks::{dir_fsync_count, full_flush_count, set_git_program};
 pub use jiff::Timestamp;
 pub use lock::{ReadLock, WriteLock};
-pub use names::{new_id, validate_collection_name, validate_db_name, validate_id};
+pub use names::{
+    new_id, validate_collection_name, validate_db_name, validate_file_name, validate_id,
+};
 pub use query::{Cond, Dir, Filter, FindResult, Query};
 pub use snapshot::{InvalidFile, Snapshot, Status, Warning};
 pub use store::{Store, Version};

@@ -27,6 +27,7 @@ use crate::version::version_of;
 use crate::write::{Deferred, TxResult};
 
 pub const JOURNAL_FILE: &str = "journal.jsonl";
+const CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -442,11 +443,11 @@ pub(crate) fn commit(
             state.journaled.push(result.clone());
         }
     }
-    if journal
+    let due = journal
         .generation
         .is_multiple_of(state.checkpoint_interval.max(1))
-        && let Err(error) = checkpoint(root, state)
-    {
+        || fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= CHECKPOINT_BYTES);
+    if due && let Err(error) = checkpoint(root, state) {
         tracing::warn!(
             "the checkpoint failed and will be retried: {}",
             error.message

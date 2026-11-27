@@ -500,3 +500,103 @@ fn transactions_rolled_forward_after_a_lost_generation_are_not_committed_twice()
     assert_clean(root);
     assert!(store.status().unwrap().warnings.is_empty());
 }
+
+fn attach(id: &str, name: &str, bytes: &[u8]) -> Op {
+    Op::AttachFile {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        bytes: bytes.to_vec(),
+        mime: None,
+        if_version: None,
+    }
+}
+
+fn detach(id: &str, name: &str) -> Op {
+    Op::DetachFile {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        if_version: None,
+    }
+}
+
+fn tracked(root: &Path) -> Vec<String> {
+    git(root, &["ls-tree", "-r", "--name-only", "HEAD"])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn an_attached_file_is_committed_with_its_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = git_store(root);
+    store
+        .apply(Tx::new(vec![insert("main", "n1", json!({}))]))
+        .unwrap();
+    let bytes: Vec<u8> = (0..=255).collect();
+    store
+        .apply(Tx::new(vec![attach("n1", "a.png", &bytes)]))
+        .unwrap();
+    assert_clean(root);
+    assert_eq!(subjects(root)[0], "attach main/items/n1 a.png");
+    let changed = git(root, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(
+        changed.lines().collect::<Vec<_>>(),
+        ["main/items/_files/n1/a.png", "main/items/n1.json"]
+    );
+    let committed = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", "HEAD:main/items/_files/n1/a.png"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(committed, bytes);
+
+    store
+        .apply(Tx::new(vec![
+            attach("n1", "b.pdf", b"pdf"),
+            detach("n1", "a.png"),
+        ]))
+        .unwrap();
+    assert_clean(root);
+    assert!(tracked(root).contains(&"main/items/_files/n1/b.pdf".to_owned()));
+    assert!(!tracked(root).contains(&"main/items/_files/n1/a.png".to_owned()));
+
+    store
+        .apply(Tx::new(vec![Op::Delete {
+            db: "main".to_owned(),
+            coll: "items".to_owned(),
+            id: "n1".to_owned(),
+            if_version: None,
+        }]))
+        .unwrap();
+    assert_clean(root);
+    assert!(
+        !tracked(root)
+            .iter()
+            .any(|path| path.starts_with("main/items/_files/"))
+    );
+}
+
+#[test]
+fn detaching_a_file_lost_from_disk_removes_it_from_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = git_store(root);
+    store
+        .apply(Tx::new(vec![
+            insert("main", "n1", json!({})),
+            attach("n1", "a.png", b"png"),
+        ]))
+        .unwrap();
+    fs::remove_file(root.join("main/items/_files/n1/a.png")).unwrap();
+    store.apply(Tx::new(vec![detach("n1", "a.png")])).unwrap();
+    assert_clean(root);
+    assert_eq!(tracked(root).len(), 5, "{:?}", tracked(root));
+}

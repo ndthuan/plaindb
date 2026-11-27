@@ -112,6 +112,34 @@ fn run_crash(store: &Store) -> Result<()> {
     Ok(())
 }
 
+fn attachment(id: &str, n: u64) -> Op {
+    Op::AttachFile {
+        db: DB.to_owned(),
+        coll: COLLECTION.to_owned(),
+        id: id.to_owned(),
+        name: format!("f{n}.bin"),
+        bytes: format!("{id} {n}").repeat(64).into_bytes(),
+        mime: None,
+        if_version: None,
+    }
+}
+
+fn run_attach(store: &Store, count: u64) -> Result<()> {
+    let id = format!("w{}", std::process::id());
+    store.apply(Tx::new(vec![insert(Some(&id), json!({}))]))?;
+    for n in 0..count {
+        store.apply(Tx::new(vec![attachment(&id, n)]))?;
+    }
+    println!("{id}");
+    Ok(())
+}
+
+fn run_attach_crash(store: &Store) -> Result<()> {
+    let result = store.apply(Tx::new(vec![attachment("a", 0), attachment("b", 0)]))?;
+    println!("{}", result.tx_id);
+    Ok(())
+}
+
 const SOAK_COLLECTIONS: [&str; 3] = ["docs", "cards", "notes"];
 const SOAK_IDS: u64 = 200;
 
@@ -264,7 +292,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: plaindb-test-writer <store> <insert|patch|tx|put-all|crash|open|soak|push|gc> [count] [log]"
+            "usage: plaindb-test-writer <store> <insert|patch|tx|put-all|crash|attach|attach-crash|open|soak|push|gc> [count] [log]"
         );
         return ExitCode::from(2);
     }
@@ -275,6 +303,8 @@ fn main() -> ExitCode {
         "tx" => run_transactions(&store, count),
         "put-all" => run_put_all(&store, count),
         "crash" => run_crash(&store),
+        "attach" => run_attach(&store, count),
+        "attach-crash" => run_attach_crash(&store),
         "open" => Ok(()),
         "push" => store.push().map(|outcome| println!("{outcome:?}")),
         "gc" => store.gc().map(|report| println!("{:?}", report.outcome)),

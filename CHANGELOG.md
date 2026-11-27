@@ -4,6 +4,10 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+
+- Documents can carry attached files, such as images, PDFs or audio. Each file is stored as itself in `<db>/<collection>/_files/<id>/<name>` and described in the document's system field `_files` by its size, SHA-256 and MIME type. A file is attached or detached in the same transaction, journal record and git commit as its document, and is refused over `limits.max_file_bytes` (10 MiB by default). Deleting a document removes its files, a file changed by hand is not overwritten (`version_conflict` with the reason `changed_on_disk`), and document writes cannot set `_files`.
+
 ### Changed
 
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
@@ -31,6 +35,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - Outside macOS, `durability: full` flushes files and directories with `fsync` instead of `fdatasync`, so it is never weaker than `normal`, which flushes directories with `fsync` too.
 - A file plaindb rewrites keeps its permission bits on Unix; before, a mode set by hand was lost on the next write of that document.
 - Recovery, when a store is opened or an interrupted write is finished, removes a leftover temp file only when it is older than 60 seconds, so the temp file of a write still in progress, such as an index cache a reader is saving, is left alone.
+- The journal is also checkpointed once it reaches 32 MiB, so large writes do not pile up in it until the checkpoint interval.
 
 ## [0.1.0] - 2026-11-26
 

@@ -9,6 +9,7 @@ pub const STORE_FORMAT: u32 = 1;
 pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_CHECKPOINT_INTERVAL: u64 = 64;
 pub const DEFAULT_GC_EVERY: u64 = 200;
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,12 +59,24 @@ impl Durability {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Limits {
     pub max_document_bytes: Option<u64>,
+    pub max_file_bytes: Option<u64>,
     pub max_results: Option<u64>,
     pub max_scan_ms: Option<u64>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_document_bytes: None,
+            max_file_bytes: Some(DEFAULT_MAX_FILE_BYTES),
+            max_results: None,
+            max_scan_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +109,7 @@ pub const SETTING_KEYS: &[&str] = &[
     "gc_every",
     "checkpoint_interval",
     "limits.max_document_bytes",
+    "limits.max_file_bytes",
     "limits.max_results",
     "limits.max_scan_ms",
 ];
@@ -193,6 +207,7 @@ fn parse_positive_limit(key: &str, value: &str) -> Result<Option<u64>> {
 impl Limits {
     pub(crate) fn validate(&self) -> Result<()> {
         for (key, limit) in [
+            ("limits.max_file_bytes", self.max_file_bytes),
             ("limits.max_results", self.max_results),
             ("limits.max_scan_ms", self.max_scan_ms),
         ] {
@@ -273,6 +288,9 @@ impl StoreConfig {
             }
             "limits.max_document_bytes" => {
                 self.limits.max_document_bytes = parse_limit(key, value)?;
+            }
+            "limits.max_file_bytes" => {
+                self.limits.max_file_bytes = parse_positive_limit(key, value)?;
             }
             "limits.max_results" => self.limits.max_results = parse_positive_limit(key, value)?,
             "limits.max_scan_ms" => self.limits.max_scan_ms = parse_positive_limit(key, value)?,

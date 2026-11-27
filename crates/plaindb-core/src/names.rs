@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 
 const MAX_COLLECTION_NAME: usize = 64;
 const MAX_ID: usize = 128;
+const MAX_FILE_NAME: usize = 128;
 
 fn is_name_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
@@ -61,6 +62,24 @@ pub fn validate_id(id: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::invalid_name("id", id))
+    }
+}
+
+fn is_file_name_byte(byte: u8) -> bool {
+    is_id_byte(byte) || byte == b'.'
+}
+
+pub fn validate_file_name(name: &str) -> Result<()> {
+    let bytes = name.as_bytes();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= MAX_FILE_NAME
+        && !matches!(bytes[0], b'.' | b'_' | b'-')
+        && !name.contains("..")
+        && bytes.iter().copied().all(is_file_name_byte);
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::invalid_name("file", name))
     }
 }
 

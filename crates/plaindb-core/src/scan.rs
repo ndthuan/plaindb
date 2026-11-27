@@ -22,7 +22,7 @@ use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 use crate::txlog::{FileStamp, file_stamp};
 use crate::version::version_of;
 
-pub(crate) const SYSTEM_FIELDS: [&str; 3] = ["_id", "_created_at", "_updated_at"];
+pub(crate) const SYSTEM_FIELDS: [&str; 4] = ["_id", "_created_at", "_updated_at", "_files"];
 pub const GENERATION_FILE: &str = "generation";
 
 const CHECKED_ATTEMPTS: usize = 5;

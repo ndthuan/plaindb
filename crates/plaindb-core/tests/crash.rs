@@ -395,3 +395,62 @@ fn an_old_temp_file_is_removed_by_the_next_recovery() {
     Store::open(temp.path()).unwrap();
     assert!(!stray.exists());
 }
+
+fn attach_writer(root: &Path, env: &[(&str, String)]) -> Command {
+    let mut command = Command::new(WRITER);
+    command.arg(root).arg("attach-crash").stdout(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
+}
+
+fn attached_bytes(id: &str) -> Vec<u8> {
+    format!("{id} 0").repeat(64).into_bytes()
+}
+
+fn attachment_path(root: &Path, id: &str) -> PathBuf {
+    root.join("main/items/_files").join(id).join("f0.bin")
+}
+
+#[test]
+fn a_crash_before_the_journal_attaches_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let before = documents(temp.path());
+    let output = run(attach_writer(
+        temp.path(),
+        &[("PLAINDB_TEST_CRASH_BEFORE_JOURNAL", "1".to_owned())],
+    ));
+    assert!(!output.status.success());
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(documents(temp.path()), before);
+    assert!(!temp.path().join("main/items/_files").exists());
+    let (a, _) = store.get("main", "items", "a").unwrap().unwrap();
+    assert!(a.get("_files").is_none());
+}
+
+#[test]
+fn a_crash_while_attaching_leaves_the_file_and_its_entry_after_reopen() {
+    for applied in 0..=4 {
+        let temp = tempfile::tempdir().unwrap();
+        seeded_store(temp.path());
+        let output = run(attach_writer(
+            temp.path(),
+            &[("PLAINDB_TEST_CRASH_AFTER", applied.to_string())],
+        ));
+        assert!(!output.status.success(), "after {applied}");
+        let store = Store::open(temp.path()).unwrap();
+        assert!(journal_is_empty(temp.path()), "after {applied}");
+        for id in ["a", "b"] {
+            assert_eq!(
+                fs::read(attachment_path(temp.path(), id)).unwrap(),
+                attached_bytes(id),
+                "after {applied}"
+            );
+            let (meta, bytes) = store.read_file("main", "items", id, "f0.bin").unwrap();
+            assert_eq!(bytes, attached_bytes(id), "after {applied}");
+            assert_eq!(meta.size, 192, "after {applied}");
+        }
+    }
+}

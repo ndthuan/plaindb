@@ -16,11 +16,16 @@ pub(crate) struct OpSummary {
     pub db: String,
     pub coll: String,
     pub id: String,
+    pub file: Option<String>,
 }
 
 impl fmt::Display for OpSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}/{}/{}", self.kind, self.db, self.coll, self.id)
+        write!(f, "{} {}/{}/{}", self.kind, self.db, self.coll, self.id)?;
+        match &self.file {
+            Some(name) => write!(f, " {name}"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -28,17 +33,20 @@ pub(crate) fn summarize(ops: &[Op], results: &[OpResult]) -> Vec<OpSummary> {
     ops.iter()
         .zip(results)
         .map(|(op, result)| {
-            let (kind, db, coll) = match op {
-                Op::Insert { db, coll, .. } => ("insert", db, coll),
-                Op::Put { db, coll, .. } => ("put", db, coll),
-                Op::Patch { db, coll, .. } => ("patch", db, coll),
-                Op::Delete { db, coll, .. } => ("delete", db, coll),
+            let (kind, db, coll, file) = match op {
+                Op::Insert { db, coll, .. } => ("insert", db, coll, None),
+                Op::Put { db, coll, .. } => ("put", db, coll, None),
+                Op::Patch { db, coll, .. } => ("patch", db, coll, None),
+                Op::Delete { db, coll, .. } => ("delete", db, coll, None),
+                Op::AttachFile { db, coll, name, .. } => ("attach", db, coll, Some(name)),
+                Op::DetachFile { db, coll, name, .. } => ("detach", db, coll, Some(name)),
             };
             OpSummary {
                 kind,
                 db: db.clone(),
                 coll: coll.clone(),
                 id: result.id.clone(),
+                file: file.cloned(),
             }
         })
         .collect()

@@ -6,13 +6,18 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::attachments::{
+    FILES_FIELD, FileMeta, changed_on_disk, file_path, files_tree, recorded_files, sha256_hex,
+};
 use crate::codec::{Doc, codec_for};
 use crate::error::{Error, ErrorCode, Result};
 use crate::git::{self, PushOutcome};
 use crate::index::PendingWrite;
 use crate::journal::{self, JournalEntry};
 use crate::lock::WriteLock;
-use crate::names::{new_id, validate_collection_name, validate_db_name, validate_id};
+use crate::names::{
+    new_id, validate_collection_name, validate_db_name, validate_file_name, validate_id,
+};
 use crate::scan::{self, FileRef, SYSTEM_FIELDS, compile_validator, find_case_duplicates};
 use crate::snapshot::{CollectionSnapshot, DocEntry, FileEntry, Outcome, Snapshot};
 use crate::store::{Store, read_config};
@@ -44,6 +49,22 @@ pub enum Op {
         db: String,
         coll: String,
         id: String,
+        if_version: Option<String>,
+    },
+    AttachFile {
+        db: String,
+        coll: String,
+        id: String,
+        name: String,
+        bytes: Vec<u8>,
+        mime: Option<String>,
+        if_version: Option<String>,
+    },
+    DetachFile {
+        db: String,
+        coll: String,
+        id: String,
+        name: String,
         if_version: Option<String>,
     },
 }
@@ -143,9 +164,18 @@ impl Target {
 
 type TargetKey = (String, String, String);
 
+#[derive(Debug, Clone)]
+struct FileTarget {
+    base: Option<String>,
+    next: Option<Vec<u8>>,
+}
+
 struct Planner<'a> {
     snapshot: &'a Snapshot,
     max_document_bytes: Option<u64>,
+    max_file_bytes: Option<u64>,
+    files: BTreeMap<String, FileTarget>,
+    trees: BTreeSet<String>,
     keep_timestamps: bool,
     now: String,
     targets: BTreeMap<TargetKey, Target>,
@@ -199,6 +229,41 @@ fn check_given_id(doc: &Doc, id: &str) -> Result<()> {
 
 fn not_found(id: &str) -> Error {
     Error::not_found("document", id)
+}
+
+fn files_field_refused(id: &str) -> Error {
+    Error::invalid_document(
+        "system_field",
+        format!("{FILES_FIELD} changes only when a file is attached or detached"),
+    )
+    .with_detail("id", id)
+    .with_detail("field", FILES_FIELD)
+}
+
+fn keep_files(doc: &mut Doc, existing: Option<&Doc>) {
+    match existing.and_then(|existing| existing.get(FILES_FIELD)) {
+        Some(files) => doc.insert(FILES_FIELD.to_owned(), files.clone()),
+        None => doc.remove(FILES_FIELD),
+    };
+}
+
+fn file_too_large(id: &str, name: &str, max: u64, size: u64) -> Error {
+    Error::new(
+        ErrorCode::LimitExceeded,
+        format!("file {name} of document {id} is larger than the limit"),
+    )
+    .with_detail("id", id)
+    .with_detail("name", name)
+    .with_detail("limit", "max_file_bytes")
+    .with_detail("max", max)
+    .with_detail("bytes", size)
+}
+
+fn file_case_clash(id: &str, name: &str, existing: &str) -> Error {
+    Error::invalid_name("file", name)
+        .with_detail("id", id)
+        .with_detail("existing", existing)
+        .with_detail("reason", "case")
 }
 
 impl<'a> Planner<'a> {
@@ -413,6 +478,122 @@ impl<'a> Planner<'a> {
         Ok(())
     }
 
+    fn present(&self, db: &str, coll: &str, id: &str) -> Result<(Current, Arc<Doc>, String)> {
+        let (current, file_name) = self.current(db, coll, id)?;
+        match &current {
+            Current::Refused(reason) => Err(refused(id, reason)),
+            Current::Missing => Err(not_found(id)),
+            Current::Present { doc, .. } => {
+                let doc = doc.clone();
+                Ok((current, doc, file_name))
+            }
+        }
+    }
+
+    fn file_base(
+        &self,
+        path: &str,
+        recorded: Option<&Value>,
+        id: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        if let Some(target) = self.files.get(path) {
+            return Ok(target.base.clone());
+        }
+        if self
+            .trees
+            .iter()
+            .any(|tree| path.starts_with(&format!("{tree}/")))
+        {
+            return Ok(None);
+        }
+        let bytes = match fs::read(self.root.join(path)) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(source.into()),
+        };
+        let expected = recorded
+            .and_then(|meta| meta.get("sha256"))
+            .and_then(Value::as_str);
+        if expected != Some(sha256_hex(&bytes).as_str()) {
+            return Err(changed_on_disk(id, name));
+        }
+        Ok(Some(version_of(&bytes)))
+    }
+
+    fn change_file(
+        &mut self,
+        db: &str,
+        coll: &str,
+        id: &str,
+        name: &str,
+        if_version: Option<&String>,
+        bytes: Option<(&[u8], Option<&str>)>,
+    ) -> Result<OpResult> {
+        validate_id(id)?;
+        validate_file_name(name)?;
+        if let (Some(max), Some((bytes, _))) = (self.max_file_bytes, bytes) {
+            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if size > max {
+                return Err(file_too_large(id, name, max, size));
+            }
+        }
+        let (current, existing, file_name) = self.present(db, coll, id)?;
+        check_version(id, if_version, &current)?;
+        let mut files = recorded_files(&existing, id)?;
+        if let Some(other) = files
+            .keys()
+            .find(|known| known.as_str() != name && known.eq_ignore_ascii_case(name))
+        {
+            return Err(file_case_clash(id, name, other));
+        }
+        if bytes.is_none() && !files.contains_key(name) {
+            return Err(Error::not_found("file", name).with_detail("id", id));
+        }
+        let path = file_path(db, coll, id, name);
+        let base = self.file_base(&path, files.get(name), id, name)?;
+        match bytes {
+            Some((bytes, mime)) => {
+                let meta = FileMeta::of(name, bytes, mime);
+                files.insert(name.to_owned(), meta.to_value());
+            }
+            None => {
+                files.remove(name);
+            }
+        }
+        let mut next = (*existing).clone();
+        if files.is_empty() {
+            next.remove(FILES_FIELD);
+        } else {
+            next.insert(FILES_FIELD.to_owned(), Value::Object(files));
+        }
+        let next = self.finalize(next, id, Some(&existing));
+        let pending = self.encode(db, coll, id, &next)?;
+        let version = pending.version.clone();
+        self.stage(db, coll, file_name, id, Some(pending))?;
+        self.files.insert(
+            path,
+            FileTarget {
+                base,
+                next: bytes.map(|(bytes, _)| bytes.to_vec()),
+            },
+        );
+        Ok(OpResult {
+            id: id.to_owned(),
+            version: Some(version),
+            previous_version: current.version(),
+        })
+    }
+
+    fn remove_files_of(&mut self, db: &str, coll: &str, id: &str) {
+        let tree = files_tree(db, coll, id);
+        let inside = format!("{tree}/");
+        self.files.retain(|path, _| !path.starts_with(&inside));
+        if self.root.join(&tree).exists() {
+            self.trees.insert(tree);
+        }
+    }
+
     fn plan(&mut self, op: &Op) -> Result<OpResult> {
         match op {
             Op::Insert { db, coll, id, doc } => {
@@ -423,6 +604,9 @@ impl<'a> Planner<'a> {
                 };
                 validate_id(&id)?;
                 check_given_id(doc, &id)?;
+                if doc.contains_key(FILES_FIELD) {
+                    return Err(files_field_refused(&id));
+                }
                 let (current, file_name) = self.current(db, coll, &id)?;
                 match current {
                     Current::Refused(reason) => return Err(refused(&id, &reason)),
@@ -467,7 +651,17 @@ impl<'a> Planner<'a> {
                         None
                     }
                 };
-                let next = self.finalize(doc.clone(), id, existing.as_deref());
+                let kept = existing
+                    .as_ref()
+                    .and_then(|existing| existing.get(FILES_FIELD));
+                if doc
+                    .get(FILES_FIELD)
+                    .is_some_and(|given| Some(given) != kept)
+                {
+                    return Err(files_field_refused(id));
+                }
+                let mut next = self.finalize(doc.clone(), id, existing.as_deref());
+                keep_files(&mut next, existing.as_deref());
                 let pending = self.encode(db, coll, id, &next)?;
                 let version = pending.version.clone();
                 self.stage(db, coll, file_name, id, Some(pending))?;
@@ -485,12 +679,13 @@ impl<'a> Planner<'a> {
                 if_version,
             } => {
                 validate_id(id)?;
-                let (current, file_name) = self.current(db, coll, id)?;
-                let existing = match &current {
-                    Current::Refused(reason) => return Err(refused(id, reason)),
-                    Current::Missing => return Err(not_found(id)),
-                    Current::Present { doc, .. } => doc.clone(),
-                };
+                if patch
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key(FILES_FIELD))
+                {
+                    return Err(files_field_refused(id));
+                }
+                let (current, existing, file_name) = self.present(db, coll, id)?;
                 check_version(id, if_version.as_ref(), &current)?;
                 let mut merged = Value::Object((*existing).clone());
                 json_patch::merge(&mut merged, patch);
@@ -526,12 +721,36 @@ impl<'a> Planner<'a> {
                 }
                 check_version(id, if_version.as_ref(), &current)?;
                 self.stage(db, coll, file_name, id, None)?;
+                self.remove_files_of(db, coll, id);
                 Ok(OpResult {
                     id: id.clone(),
                     version: None,
                     previous_version: current.version(),
                 })
             }
+            Op::AttachFile {
+                db,
+                coll,
+                id,
+                name,
+                bytes,
+                mime,
+                if_version,
+            } => self.change_file(
+                db,
+                coll,
+                id,
+                name,
+                if_version.as_ref(),
+                Some((bytes, mime.as_deref())),
+            ),
+            Op::DetachFile {
+                db,
+                coll,
+                id,
+                name,
+                if_version,
+            } => self.change_file(db, coll, id, name, if_version.as_ref(), None),
         }
     }
 }
@@ -629,9 +848,13 @@ impl Store {
             return Ok(found);
         }
         let snapshot = self.snapshot.load_full();
+        let config = read_config(&self.root)?;
         let mut planner = Planner {
             snapshot: &snapshot,
-            max_document_bytes: self.config.load().limits.max_document_bytes,
+            max_document_bytes: config.limits.max_document_bytes,
+            max_file_bytes: config.limits.max_file_bytes,
+            files: BTreeMap::new(),
+            trees: BTreeSet::new(),
             keep_timestamps: tx.keep_timestamps,
             now: now_timestamp(),
             targets: BTreeMap::new(),
@@ -648,6 +871,8 @@ impl Store {
                 .map_err(|error| error.with_detail("op_index", index))?;
             results.push(result);
         }
+        let trees = planner.trees;
+        let files = planner.files;
         let targets: Vec<Target> = planner.targets.into_values().collect();
         if targets.is_empty() {
             return Ok(TxResult {
@@ -668,18 +893,21 @@ impl Store {
             push: None,
             deferred: None,
         };
-        let entries = targets
-            .iter()
-            .map(|target| match &target.next {
-                Some(pending) => {
-                    JournalEntry::write(target.relative_path(), &pending.bytes, target.base.clone())
-                }
-                None => JournalEntry::remove(target.relative_path(), target.base.clone()),
-            })
-            .collect();
+        let trees = trees.into_iter().map(JournalEntry::remove_tree);
+        let files = files.into_iter().map(|(path, target)| match &target.next {
+            Some(bytes) => JournalEntry::write(path, bytes, target.base),
+            None => JournalEntry::remove(path, target.base),
+        });
+        let documents = targets.iter().map(|target| match &target.next {
+            Some(pending) => {
+                JournalEntry::write(target.relative_path(), &pending.bytes, target.base.clone())
+            }
+            None => JournalEntry::remove(target.relative_path(), target.base.clone()),
+        });
+        let entries = trees.chain(files).chain(documents).collect();
         let plan = git::plan_tx(
             &self.root,
-            &read_config(&self.root)?,
+            &config,
             &result.tx_id,
             tx.actor.as_deref(),
             &tx.ops,

@@ -376,3 +376,35 @@ fn a_store_whose_lock_cannot_be_opened_is_read_through_a_checked_scan() {
     }
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(mode)).unwrap();
 }
+
+#[test]
+fn two_processes_attaching_files_at_once_lose_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = items_store(temp.path());
+    let children: Vec<_> = (0..2)
+        .map(|_| writer(temp.path(), "attach", 30).spawn().unwrap())
+        .collect();
+    let mut ids = Vec::new();
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ids.push(String::from_utf8(output.stdout).unwrap().trim().to_owned());
+    }
+    let reopened = Store::open(temp.path()).unwrap();
+    for store in [&store, &reopened] {
+        for id in &ids {
+            let (found, _) = store.get("main", "items", id).unwrap().unwrap();
+            assert_eq!(found["_files"].as_object().unwrap().len(), 30);
+            for n in 0..30 {
+                let (_, bytes) = store
+                    .read_file("main", "items", id, &format!("f{n}.bin"))
+                    .unwrap();
+                assert_eq!(bytes, format!("{id} {n}").repeat(64).into_bytes());
+            }
+        }
+    }
+}

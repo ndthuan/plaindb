@@ -196,3 +196,75 @@ fn a_clone_of_the_remote_opens_as_the_same_store() {
         assert_eq!(before, after);
     }
 }
+
+#[test]
+fn a_clone_of_the_remote_holds_the_same_attached_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.git");
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    let root = dir.path().join("store");
+    let original = Store::init_with(
+        &root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    original.create_db("main").unwrap();
+    for (collection, format) in COLLECTIONS {
+        original
+            .create_collection("main", collection, format)
+            .unwrap();
+    }
+    original.set_remote(remote.to_str().unwrap()).unwrap();
+    original.set_push(PushMode::OnCommit).unwrap();
+    let photo: Vec<u8> = (0..4096_u32).map(|n| (n * 7 % 251) as u8).collect();
+    for (collection, _) in COLLECTIONS {
+        let result = original
+            .apply(Tx::new(vec![
+                Op::Insert {
+                    db: "main".to_owned(),
+                    coll: collection.to_owned(),
+                    id: Some("d1".to_owned()),
+                    doc: doc(json!({ "title": collection })),
+                },
+                Op::AttachFile {
+                    db: "main".to_owned(),
+                    coll: collection.to_owned(),
+                    id: "d1".to_owned(),
+                    name: "photo.png".to_owned(),
+                    bytes: photo.clone(),
+                    mime: None,
+                    if_version: None,
+                },
+            ]))
+            .unwrap();
+        assert_eq!(result.push, Some(PushOutcome::Ok));
+    }
+
+    let copy = dir.path().join("copy");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            copy.to_str().unwrap(),
+        ],
+    );
+    let restored = Store::open(&copy).unwrap();
+    assert!(restored.status().unwrap().warnings.is_empty());
+    for (collection, _) in COLLECTIONS {
+        let (before, _) = original.get("main", collection, "d1").unwrap().unwrap();
+        let (after, _) = restored.get("main", collection, "d1").unwrap().unwrap();
+        assert_eq!(after["_files"], before["_files"]);
+        let (meta, bytes) = restored
+            .read_file("main", collection, "d1", "photo.png")
+            .unwrap();
+        assert_eq!(bytes, photo);
+        assert_eq!(meta.size, 4096);
+    }
+}
