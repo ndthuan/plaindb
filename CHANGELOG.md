@@ -10,12 +10,26 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - `plaindb file put`, `file get`, `file list` and `file rm` attach, read, list and remove the files of a document. `file get` prints the bytes on standard output, or with `--out` writes them to a file; under `--json` it needs `--out`.
 - The MCP tools `plaindb_put_file`, `plaindb_get_file` and `plaindb_delete_file` attach, read and remove files as base64; `--read-only` offers only `plaindb_get_file` of them.
 - `plaindb doctor` warns about attached files that are missing (`attachment_missing`), changed by hand (`attachment_mismatch`) or listed by no document (`attachment_orphan`), each with the first 10 and how to fix them.
+- `find --all` prints every match in one call, following the cursor itself, with `next_cursor` null; it cannot be combined with `--cursor` or `--limit` and fails with `limit_exceeded` past `limits.max_results`.
+- `push: background` commits, starts a detached `plaindb push --after-write` and lets the write return before its push. `status` shows `push_running` and `next_push_at`, and `doctor` warns with `git_push_stuck` about a push running for 10 minutes.
+- `plaindb doctor` gains `git_worktree`, a warning when database files differ from `HEAD` while no commit waits, and `git_head_branch`, for a `HEAD` that is off the configured branch, with the fix for each. `status` warns with `head_off_branch`, `git_repository_missing`, `git_commit_pending`, `git_binary_ignored` and `journal_unfinished` for the states they name.
 
 ### Changed
 
 - `plaindb import` drops the `_files` field of each document instead of failing the document with `invalid_document`, and lists the ids of those documents under `files_dropped` in its report. Attached files are not part of an export or an import.
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
 - plaindb is now licensed under MIT instead of AGPL-3.0-only.
+- `patch`, `collection schema set` and `tx` each take one of `--data` and `--file` like `insert` and `put`, and `--file -` reads standard input; giving both, or neither, is a usage error.
+- `plaindb export` writes to a hidden temporary file beside `--out` and renames it over the target only after it is flushed, and resolves the collection first, so a misspelt name or an error no longer empties or shortens an earlier backup. `--out -` writes to standard output instead of a file named `-`.
+- A new database or collection name may not start with `-`; names that already do stay usable.
+- `checkpoint_interval` is a setting that `config set` can change, a whole number above 0. A key in `_store.json` that is not a setting is kept when the file is rewritten and shown by `status` and `doctor` as a warning.
+- `init` refuses `--remote`, `--push on-commit` and `--commit manual` without `--git` before it creates anything.
+- The git program comes from `PLAINDB_GIT`, an absolute path or a program name, or else `git` on `PATH`. `git_binary` is no longer a setting: `config set` refuses it, and an old value is ignored with a warning.
+- A write with `push: on-commit` makes one push attempt of at most 10 seconds. A failure records a retry time, 30 seconds doubling up to an hour, and writes until then report `deferred` without starting git; a store whose remote has no URL starts no push. `plaindb push` and the MCP tool keep three attempts and ignore the wait. A git process that outlives a timeout is killed with its whole process group.
+- A push whose `HEAD` is off the configured branch is refused with `head_off_branch`, and the `branch` setting only accepts the checked-out branch once a repository exists.
+- `plaindb doctor` fixes name the right commands and quote the store path, and its lock check looks only at the locks a commit needs. `git gc --auto` held off by another gc is tried again by the next write. A store notices documents that a fast-forward of plaindb commits brought in.
+- A manual commit keeps a file committed outside the databases, such as a script or a `.gitkeep`, instead of removing it from the tree.
+- `plaindb_push` over MCP no longer takes `reset_remote_ahead`; that is for a person on the command line.
 - Every read sees each transaction whole, also across processes: scans hold a shared lock on `.plaindb/lock`, and a store whose lock file cannot be opened is scanned until nothing moved.
 - Read commands and MCP read tools open the store for reading: they change nothing but the index cache, never checkpoint the journal or touch `.git`, and work on a directory that cannot be written.
 - With git on and no `.git` directory, plaindb no longer starts a new repository by itself: writes fail with `git_disabled` and the reason `repository_missing` until `plaindb git enable`.
@@ -42,6 +56,18 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - The journal is also checkpointed once it reaches 32 MiB, so large writes do not pile up in it until the checkpoint interval.
 - After the machine restarts, a document file that a committed insert created and that is missing is written again from the journal, so an insert whose rename a power loss took is no longer lost; later transactions in the journal still have the last word. A file deleted by hand before the next checkpoint therefore comes back after a reboot. A generation file that cannot be read as a number now logs a warning.
 - A power-loss test runs on Linux CI: a store at `full` on LazyFS, with the unflushed file data dropped at a random point, keeps every committed insert. `make powerloss` runs it on a Linux machine with FUSE.
+
+### Fixed
+
+- `plaindb doctor` says `1 check failed` in its error line, not `1 checks failed`.
+- A push lock and a gc lock are unlocked when released, so a push right after a write no longer finds the lock still taken.
+
+### Security
+
+- `remote` and `branch` follow strict name rules, checked by `config set` and each time `_store.json` is read, and a push sends `refs/heads/<branch>:refs/heads/<branch>` with the remote after `--`, so a store from a clone cannot pass an option to git or force or delete a remote branch. A store that breaks the rules fails to open with `invalid_config`, and `doctor` reports a `store_config` error.
+- Every git run is confined to the store's own repository: `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` from the caller are ignored, and a store whose `.git` is gone no longer writes into an enclosing repository.
+- MCP tools refuse an argument they do not know with `invalid_params`, so a misspelt `ifVersion` no longer turns a conditional write into an unconditional one.
+- The userinfo of an `http` or `https` remote URL is shown as `***` in `status`, `doctor` and push messages.
 
 ## [0.1.0] - 2026-11-26
 
