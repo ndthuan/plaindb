@@ -26,8 +26,8 @@ $(LAZYFS_DIR)/lazyfs/build/lazyfs:
 	git init -q $(LAZYFS_DIR)
 	git -C $(LAZYFS_DIR) fetch -q --depth 1 https://github.com/dsrhaslab/lazyfs.git $(LAZYFS_COMMIT)
 	git -C $(LAZYFS_DIR) checkout -q FETCH_HEAD
-	cd $(LAZYFS_DIR)/libs/libpcache && ./build.sh
-	cd $(LAZYFS_DIR)/lazyfs && ./build.sh
+	cd $(LAZYFS_DIR)/libs/libpcache && CMAKE_POLICY_VERSION_MINIMUM=3.5 ./build.sh
+	cd $(LAZYFS_DIR)/lazyfs && CMAKE_POLICY_VERSION_MINIMUM=3.5 ./build.sh
 
 powerloss: $(LAZYFS_DIR)/lazyfs/build/lazyfs
 	scripts/powerloss.sh $(LAZYFS_DIR) target/powerloss $(POWERLOSS_EXPECT)

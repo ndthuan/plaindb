@@ -3,7 +3,7 @@ set -euo pipefail
 
 source_dir=$(cd "$1" && pwd)
 lazyfs="$source_dir/lazyfs/build/lazyfs"
-export LD_LIBRARY_PATH="$source_dir/libs/libpcache/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$source_dir/libs/libpcache/build:$source_dir/libs/libpcache/build/_deps/spdlog-build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 work=$(mkdir -p "$2" && cd "$2" && pwd)
 expect=${3:-pass}
 
