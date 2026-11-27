@@ -57,7 +57,10 @@ pub fn run(context: &Context, args: &DoctorArgs) -> Output {
         0 => output,
         failed => output.with_exit_code(1).with_failure(
             "doctor_failed",
-            format!("{failed} checks failed"),
+            match failed {
+                1 => "1 check failed".to_owned(),
+                _ => format!("{failed} checks failed"),
+            },
             json!({ "report": report.to_json() }),
         ),
     }

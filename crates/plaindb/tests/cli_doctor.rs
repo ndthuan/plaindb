@@ -660,7 +660,7 @@ fn a_failing_check_makes_the_json_line_a_failure_with_the_report() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error"]["code"], "doctor_failed");
-    assert_eq!(parsed["error"]["message"], "1 checks failed");
+    assert_eq!(parsed["error"]["message"], "1 check failed");
     let report = &parsed["error"]["details"]["report"];
     assert!(schema_validator().is_valid(report), "{report}");
     assert!(
@@ -741,5 +741,36 @@ fn a_file_changed_by_hand_is_a_doctor_warning_with_a_fix() {
     assert_eq!(
         doctor(&store, &["--offline"]).status("attachment_mismatch"),
         "ok"
+    );
+}
+
+#[test]
+fn the_error_line_says_one_check_failed_in_the_singular() {
+    let fixture = fixture("off");
+    let lock = fixture.store.join(".git/index.lock");
+    fs::write(&lock, "").expect("the lock is written");
+    age(&lock, 11 * 60);
+    let output = plaindb(&fixture.store, &["doctor", "--offline"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("text");
+    assert!(
+        stderr.contains("error[doctor_failed]: 1 check failed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn the_error_line_says_how_many_checks_failed_in_the_plural() {
+    let fixture = fixture("on-commit");
+    git(&fixture.store, &["checkout", "-q", "-b", "other"]);
+    let lock = fixture.store.join(".git/index.lock");
+    fs::write(&lock, "").expect("the lock is written");
+    age(&lock, 11 * 60);
+    let output = plaindb(&fixture.store, &["doctor", "--offline"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("text");
+    assert!(
+        stderr.contains("error[doctor_failed]: 2 checks failed"),
+        "{stderr}"
     );
 }
