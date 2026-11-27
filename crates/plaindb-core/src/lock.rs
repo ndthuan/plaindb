@@ -1,8 +1,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
-use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::atomic::ensure_dir;
 use crate::config::DEFAULT_LOCK_TIMEOUT_MS;
@@ -13,6 +12,7 @@ use crate::store::STATE_DIR;
 pub const LOCK_FILE: &str = "lock";
 pub const QUEUE_FILE: &str = "lock-queue";
 pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_millis(DEFAULT_LOCK_TIMEOUT_MS);
+const RETRY_DELAY: Duration = Duration::from_millis(5);
 
 #[derive(Debug)]
 pub struct WriteLock {
@@ -59,26 +59,28 @@ impl WriteLock {
         let store = store.as_ref();
         let file = Self::open(store, LOCK_FILE)?;
         let queue = Self::open(store, QUEUE_FILE)?;
-        if !Self::others_are_waiting(&queue)? && !would_block(file.try_lock())? {
+        let others_wait = Self::others_are_waiting(&queue)?;
+        if !others_wait && !would_block(file.try_lock())? {
             return Ok(Self { file });
         }
         would_block(queue.try_lock_shared())?;
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let outcome = file.lock().map(|()| file);
-            let _ = sender.send(outcome);
-        });
-        match receiver.recv_timeout(timeout) {
-            Ok(Ok(file)) => Ok(Self { file }),
-            Ok(Err(source)) => Err(source.into()),
-            Err(_) => Err(Error::new(
-                ErrorCode::StoreLockedTimeout,
-                "another process holds the store's write lock",
-            )
-            .with_detail(
-                "timeout_ms",
-                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            )),
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Error::new(
+                    ErrorCode::StoreLockedTimeout,
+                    "another process holds the store's write lock",
+                )
+                .with_detail(
+                    "timeout_ms",
+                    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                ));
+            }
+            thread::sleep(RETRY_DELAY.min(deadline - now));
+            if !would_block(file.try_lock())? {
+                return Ok(Self { file });
+            }
         }
     }
 }

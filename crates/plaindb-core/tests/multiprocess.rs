@@ -151,3 +151,53 @@ fn a_held_lock_times_out_after_five_seconds() {
     }
     assert_eq!(store.list_ids("main", "items").unwrap().len(), 5);
 }
+
+fn holding_writer(root: &Path, hold_ms: u64) -> std::process::Child {
+    let mut child = writer(root, "tx", 1)
+        .env("PLAINDB_TEST_HOLD_LOCK_MS", hold_ms.to_string())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let journal = root.join(".plaindb").join("journal.jsonl");
+    let waiting = Instant::now();
+    while std::fs::metadata(&journal).map_or(0, |meta| meta.len()) == 0 {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(waiting.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    child
+}
+
+#[test]
+fn a_short_lock_wait_times_out_on_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = items_store(temp.path());
+    store.checkpoint().unwrap();
+    let mut child = holding_writer(temp.path(), 3_000);
+    for _ in 0..5 {
+        let started = Instant::now();
+        let error = WriteLock::acquire(temp.path(), Duration::from_millis(50)).unwrap_err();
+        let waited = started.elapsed();
+        assert_eq!(error.code, ErrorCode::StoreLockedTimeout);
+        assert!(waited >= Duration::from_millis(50), "{waited:?}");
+        assert!(waited <= Duration::from_millis(300), "{waited:?}");
+    }
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn a_lock_released_while_waiting_is_taken() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = items_store(temp.path());
+    store.checkpoint().unwrap();
+    let mut child = holding_writer(temp.path(), 100);
+    let started = Instant::now();
+    let lock = WriteLock::acquire(temp.path(), Duration::from_secs(2)).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(lock);
+    assert!(child.wait().unwrap().success());
+}
