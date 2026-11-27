@@ -338,3 +338,193 @@ fn count_distinct_and_limits() {
     };
     assert_eq!(store.find(missing).unwrap_err().code, ErrorCode::NotFound);
 }
+
+fn values_store(root: &std::path::Path, field: &str, values: &[Value]) -> Store {
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "items", Format::Json)
+        .unwrap();
+    let ops = values
+        .iter()
+        .enumerate()
+        .map(|(n, value)| insert(&format!("v{n}"), json!({ field: value })))
+        .collect();
+    store.apply(Tx::new(ops)).unwrap();
+    store
+}
+
+fn unique_on(store: &Store, field: &str) -> plaindb_core::Result<()> {
+    store.set_indexes(
+        "main",
+        "items",
+        vec![plaindb_core::IndexSpec::Field {
+            field: field.to_owned(),
+            unique: true,
+            multi: false,
+        }],
+    )
+}
+
+fn sorted_ids(store: &Store, field: &str) -> Vec<String> {
+    store
+        .find(Query {
+            sort: vec![(field.to_owned(), Dir::Asc)],
+            ..query(Value::Null)
+        })
+        .unwrap()
+        .docs
+        .iter()
+        .map(|(doc, _)| doc["_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn integers_beyond_two_to_the_fifty_three_stay_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(
+        dir.path(),
+        "ext",
+        &[
+            json!(9_007_199_254_740_992_u64),
+            json!(9_007_199_254_740_993_u64),
+        ],
+    );
+    assert_eq!(
+        ids(&store, json!({"ext": 9_007_199_254_740_993_u64})),
+        ["v1"]
+    );
+    assert_eq!(
+        store
+            .distinct("main", "items", "ext", &Value::Null)
+            .unwrap()
+            .len(),
+        2
+    );
+    unique_on(&store, "ext").unwrap();
+    assert_eq!(
+        ids(&store, json!({"ext": 9_007_199_254_740_993_u64})),
+        ["v1"]
+    );
+}
+
+#[test]
+fn integers_of_every_width_sort_in_numeric_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(
+        dir.path(),
+        "n",
+        &[
+            json!(u64::MAX),
+            json!(-1),
+            json!(i64::MAX),
+            json!(i64::MIN),
+            json!(-0.5),
+            json!(9_223_372_036_854_775_808_u64),
+            json!(9_223_372_036_854_775_806_i64),
+        ],
+    );
+    assert_eq!(
+        sorted_ids(&store, "n"),
+        ["v3", "v1", "v4", "v6", "v2", "v5", "v0"]
+    );
+}
+
+#[test]
+fn an_integer_and_the_same_float_are_one_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(
+        dir.path(),
+        "x",
+        &[
+            json!(1),
+            json!(1.0),
+            json!(-0.0),
+            json!(0),
+            json!(0.0),
+            json!(-3),
+            json!(-3.0),
+        ],
+    );
+    assert_eq!(ids(&store, json!({"x": -3})), ["v5", "v6"]);
+    assert_eq!(ids(&store, json!({"x": 1})), ["v0", "v1"]);
+    assert_eq!(ids(&store, json!({"x": 1.0})), ["v0", "v1"]);
+    assert_eq!(
+        store
+            .distinct("main", "items", "x", &Value::Null)
+            .unwrap()
+            .len(),
+        3
+    );
+    let error = unique_on(&store, "x").unwrap_err();
+    assert_eq!(error.code, ErrorCode::UniqueViolation);
+}
+
+#[test]
+fn objects_compare_by_their_values_under_a_unique_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(dir.path(), "o", &[json!({"x": 1})]);
+    assert_eq!(ids(&store, json!({"o": {"x": 1.0}})), ["v0"]);
+    unique_on(&store, "o").unwrap();
+    let error = store
+        .apply(Tx::new(vec![insert("w", json!({"o": {"x": 1.0}}))]))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UniqueViolation);
+}
+
+#[test]
+fn arrays_and_objects_compare_element_by_element() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(
+        dir.path(),
+        "w",
+        &[
+            json!({"l": [10]}),
+            json!({"l": [9]}),
+            json!({"l": [9, 1]}),
+            json!({"m": 1}),
+            json!({"l": [9], "m": 0}),
+            json!({"l": [2.5]}),
+        ],
+    );
+    assert_eq!(
+        store.distinct("main", "items", "w", &Value::Null).unwrap(),
+        [
+            json!({"l": [2.5]}),
+            json!({"l": [9]}),
+            json!({"l": [9], "m": 0}),
+            json!({"l": [9, 1]}),
+            json!({"l": [10]}),
+            json!({"m": 1}),
+        ]
+    );
+}
+
+#[test]
+fn floats_and_integers_order_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = values_store(
+        dir.path(),
+        "n",
+        &[
+            json!(3),
+            json!(2.5),
+            json!(2),
+            json!(9_007_199_254_740_993_u64),
+            json!(9_007_199_254_740_992.0),
+        ],
+    );
+    assert_eq!(ids(&store, json!({"n": {"$gt": 2, "$lt": 3}})), ["v1"]);
+    assert_eq!(
+        ids(&store, json!({"n": {"$gt": 9_007_199_254_740_992.0}})),
+        ["v3"]
+    );
+    assert_eq!(sorted_ids(&store, "n"), ["v2", "v1", "v0", "v4", "v3"]);
+}

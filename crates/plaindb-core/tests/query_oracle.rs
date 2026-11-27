@@ -21,11 +21,70 @@ fn rank(value: &Value) -> u8 {
     }
 }
 
+fn whole(number: &serde_json::Number) -> Option<i128> {
+    if let Some(value) = number.as_u64() {
+        return Some(i128::from(value));
+    }
+    number.as_i64().map(i128::from)
+}
+
+fn whole_against_float(whole: i128, float: f64) -> Ordering {
+    #[allow(clippy::cast_precision_loss)]
+    let rounded = whole as f64;
+    match rounded.partial_cmp(&float) {
+        Some(Ordering::Equal) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let exact = float as i128;
+            whole.cmp(&exact)
+        }
+        Some(ordering) => ordering,
+        None => Ordering::Less,
+    }
+}
+
+fn order_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    let zeroed = |value: f64| if value == 0.0 { 0.0 } else { value };
+    match (whole(left), whole(right)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(a), None) => whole_against_float(a, right.as_f64().unwrap()),
+        (None, Some(b)) => whole_against_float(b, left.as_f64().unwrap()).reverse(),
+        (None, None) => zeroed(left.as_f64().unwrap()).total_cmp(&zeroed(right.as_f64().unwrap())),
+    }
+}
+
+fn order_sequences<'a>(
+    left: impl ExactSizeIterator<Item = (Option<&'a String>, &'a Value)>,
+    right: impl ExactSizeIterator<Item = (Option<&'a String>, &'a Value)>,
+) -> Ordering {
+    let lengths = left.len().cmp(&right.len());
+    for ((left_key, left_value), (right_key, right_value)) in left.zip(right) {
+        let ordering = left_key
+            .cmp(&right_key)
+            .then_with(|| order(left_value, right_value));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    lengths
+}
+
 fn order(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (Value::Number(a), Value::Number(b)) => a.as_f64().unwrap().total_cmp(&b.as_f64().unwrap()),
+        (Value::Number(a), Value::Number(b)) => order_numbers(a, b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Array(a), Value::Array(b)) => order_sequences(
+            a.iter().map(|value| (None, value)),
+            b.iter().map(|value| (None, value)),
+        ),
+        (Value::Object(a), Value::Object(b)) => {
+            let a: std::collections::BTreeMap<&String, &Value> = a.iter().collect();
+            let b: std::collections::BTreeMap<&String, &Value> = b.iter().collect();
+            order_sequences(
+                a.into_iter().map(|(key, value)| (Some(key), value)),
+                b.into_iter().map(|(key, value)| (Some(key), value)),
+            )
+        }
         _ => rank(left).cmp(&rank(right)),
     }
 }

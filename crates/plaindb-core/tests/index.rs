@@ -90,11 +90,50 @@ fn ids(store: &Store, coll: &str, filter: &Value) -> Vec<String> {
         .collect()
 }
 
+fn edge_numbers() -> Vec<Value> {
+    vec![
+        json!(1.0),
+        json!(2.5),
+        json!(-0.0),
+        json!(0.0),
+        json!(-1),
+        json!(9_007_199_254_740_992_u64),
+        json!(9_007_199_254_740_993_u64),
+        json!(9_007_199_254_740_992.0),
+        json!(i64::MAX),
+        json!(9_223_372_036_854_775_808_u64),
+        json!(u64::MAX),
+        json!(i64::MIN),
+    ]
+}
+
+fn nested_values() -> Vec<Value> {
+    vec![
+        json!({"x": [9]}),
+        json!({"x": [10]}),
+        json!({"x": [9, 1]}),
+        json!({"x": [1.0]}),
+        json!({"x": 1}),
+        json!({"x": 1.0}),
+        json!({"x": 1, "y": [2]}),
+        json!({"y": 0}),
+    ]
+}
+
 fn small_scalar(seed: &mut fastrand::Rng) -> Value {
-    match seed.u8(0..4) {
+    match seed.u8(0..7) {
         0 => json!(seed.i64(0..6)),
         1 => json!(["a", "b", "ab", "c"][seed.usize(0..4)]),
         2 => json!(seed.bool()),
+        3 => {
+            let numbers = edge_numbers();
+            numbers[seed.usize(0..numbers.len())].clone()
+        }
+        4 => {
+            let nested = nested_values();
+            nested[seed.usize(0..nested.len())].clone()
+        }
+        5 => json!(f64::from(seed.u8(0..12)) / 2.0),
         _ => Value::Null,
     }
 }
@@ -105,7 +144,15 @@ fn random_doc(seed: &mut fastrand::Rng) -> Value {
         value["a"] = small_scalar(seed);
     }
     if seed.u8(0..4) != 0 {
-        let items: Vec<Value> = (0..seed.usize(0..4)).map(|_| small_scalar(seed)).collect();
+        let items: Vec<Value> = (0..seed.usize(0..4))
+            .map(|_| {
+                if seed.u8(0..6) == 0 {
+                    json!([small_scalar(seed)])
+                } else {
+                    small_scalar(seed)
+                }
+            })
+            .collect();
         value["t"] = Value::Array(items);
     }
     if seed.u8(0..4) != 0 {
@@ -120,6 +167,8 @@ fn random_doc(seed: &mut fastrand::Rng) -> Value {
 fn cond_strategy() -> impl Strategy<Value = Value> {
     let scalar = prop_oneof![
         (0i64..6).prop_map(|n| json!(n)),
+        prop::sample::select(edge_numbers()),
+        (0u8..12).prop_map(|n| json!(f64::from(n) / 2.0)),
         prop::sample::select(vec!["a", "b", "ab", "c", ""]).prop_map(|text| json!(text)),
         any::<bool>().prop_map(|flag| json!(flag)),
         Just(Value::Null),
