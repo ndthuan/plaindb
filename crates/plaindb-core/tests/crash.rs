@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use plaindb_core::{Doc, Format, Op, Store, Tx, TxResult, scan::read_generation};
 use serde_json::{Value, json};
@@ -358,4 +358,40 @@ fn a_created_file_removed_by_hand_stays_removed_after_a_reboot() {
     assert!(!path.exists());
     assert!(store.get("main", "items", "c1").unwrap().is_none());
     assert!(store.get("main", "items", "c2").unwrap().is_some());
+}
+
+fn stray_temp_file(root: &Path, age: Duration) -> PathBuf {
+    let path = root
+        .join("main")
+        .join("items")
+        .join(format!(".x.json.tmp-{}", plaindb_core::new_id()));
+    let file = fs::File::create(&path).unwrap();
+    file.set_modified(SystemTime::now() - age).unwrap();
+    path
+}
+
+#[test]
+fn a_recent_temp_file_is_left_by_a_write_and_a_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = seeded_store(temp.path());
+    let stray = stray_temp_file(temp.path(), Duration::ZERO);
+    store
+        .apply(Tx::new(vec![insert("later", json!({}))]))
+        .unwrap();
+    drop(store);
+    assert!(stray.exists());
+    written_but_not_checkpointed(temp.path(), 0);
+    Store::open(temp.path()).unwrap();
+    assert!(journal_is_empty(temp.path()));
+    assert!(stray.exists());
+}
+
+#[test]
+fn an_old_temp_file_is_removed_by_the_next_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    seeded_store(temp.path());
+    let stray = stray_temp_file(temp.path(), Duration::from_secs(120));
+    written_but_not_checkpointed(temp.path(), 0);
+    Store::open(temp.path()).unwrap();
+    assert!(!stray.exists());
 }

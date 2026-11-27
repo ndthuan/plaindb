@@ -1,12 +1,14 @@
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::Durability;
 use crate::error::{Error, ErrorCode, Result};
 use crate::hooks;
 
 pub(crate) const TEMP_MARKER: &str = ".tmp-";
+const STRAY_TEMP_AGE: Duration = Duration::from_secs(60);
 
 #[cfg(target_vendor = "apple")]
 mod platform {
@@ -227,6 +229,17 @@ pub(crate) fn remove_tree(path: &Path) -> Result<()> {
     }
 }
 
+fn is_stray(entry: &fs::DirEntry) -> bool {
+    entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| {
+            modified
+                .elapsed()
+                .is_ok_and(|elapsed| elapsed >= STRAY_TEMP_AGE)
+        })
+}
+
 pub(crate) fn remove_temp_files(dir: &Path) -> Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -238,7 +251,11 @@ pub(crate) fn remove_temp_files(dir: &Path) -> Result<()> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if name.starts_with('.') && name.contains(TEMP_MARKER) && entry.file_type()?.is_file() {
+        if name.starts_with('.')
+            && name.contains(TEMP_MARKER)
+            && entry.file_type()?.is_file()
+            && is_stray(&entry)
+        {
             unlink(&entry.path())?;
         }
     }
