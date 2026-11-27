@@ -126,7 +126,7 @@ pub(super) fn checks(root: &Path, snapshot: &Snapshot) -> Vec<Check> {
             "attachment_mismatch",
             &found.mismatch,
             "attached files differ in size or sha256 from their document's _files",
-            "put the right bytes back by hand and run plaindb file put <db> <collection> <id> --name <name> --from <path> with them, or remove the file by hand and run plaindb file rm <db> <collection> <id> --name <name>",
+            "restore the bytes the document records, or remove the file by hand, then attach new bytes with plaindb file put <db> <collection> <id> --name <name> --from <path> or forget it with plaindb file rm <db> <collection> <id> --name <name>",
         ),
         problem(
             "attachment_orphan",

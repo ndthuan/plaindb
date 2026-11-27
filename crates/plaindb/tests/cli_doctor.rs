@@ -723,4 +723,23 @@ fn a_file_changed_by_hand_is_a_doctor_warning_with_a_fix() {
             .expect("a fix")
             .contains("plaindb file")
     );
+    fs::remove_file(store.join("app/notes/_files/a/photo.png")).expect("the removal");
+    succeed(
+        &store,
+        &[
+            "file",
+            "put",
+            "app",
+            "notes",
+            "a",
+            "--name",
+            "photo.png",
+            "--from",
+            source.to_str().expect("a path"),
+        ],
+    );
+    assert_eq!(
+        doctor(&store, &["--offline"]).status("attachment_mismatch"),
+        "ok"
+    );
 }

@@ -433,13 +433,9 @@ fn missing_changed_and_orphan_files_are_warnings_with_a_fix() {
     let mismatch = find(&store, "attachment_mismatch");
     assert_eq!(mismatch.status, CheckStatus::Warn);
     assert_eq!(mismatch.details["first"], json!(["main/items/a/two.pdf"]));
-    assert!(
-        mismatch
-            .fix
-            .as_deref()
-            .unwrap()
-            .contains("plaindb file put")
-    );
+    let fix = mismatch.fix.as_deref().unwrap();
+    assert!(fix.contains("restore"), "{fix}");
+    assert!(fix.contains("remove the file by hand, then"), "{fix}");
 
     let orphan = find(&store, "attachment_orphan");
     assert_eq!(orphan.status, CheckStatus::Warn);
