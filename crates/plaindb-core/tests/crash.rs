@@ -208,8 +208,11 @@ fn opening_while_a_writer_holds_the_lock_waits_for_its_whole_transaction() {
     let store = Store::open(temp.path()).unwrap();
     assert_committed(&store);
     assert!(child.wait().unwrap().success());
-    assert!(journal_is_empty(temp.path()));
+    assert!(unfinished_records(temp.path()).is_empty());
     assert_committed(&store);
+    drop(store);
+    assert!(journal_is_empty(temp.path()));
+    assert_committed(&Store::open(temp.path()).unwrap());
 }
 
 fn captured_writer(root: &Path, env: &[(&str, String)]) -> Command {
