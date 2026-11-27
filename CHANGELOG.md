@@ -8,6 +8,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
 - plaindb is now licensed under MIT instead of AGPL-3.0-only.
+- A write that reached the journal always succeeds. When a later step fails, the result carries `deferred` with the step and the error, the command prints a warning and exits 0, and `status` and `doctor` show git commits that are still to be made.
 
 ## [0.1.0] - 2026-11-26
 

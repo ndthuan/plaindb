@@ -710,3 +710,80 @@ fn init_refuses_a_directory_that_holds_a_store() {
         "already_exists"
     );
 }
+
+fn set_tree_writable(path: &Path, writable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).expect("the path exists");
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    permissions.set_mode(if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    });
+    fs::set_permissions(path, permissions).expect("permissions change");
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).expect("the directory reads") {
+            set_tree_writable(&entry.expect("an entry").path(), writable);
+        }
+    }
+}
+
+#[test]
+fn a_write_whose_commit_fails_is_reported_as_written() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    succeed(dir.path(), "init", &["init", "--git"]);
+    succeed(dir.path(), "db_ack", &["db", "create", "app"]);
+    succeed(
+        dir.path(),
+        "collection_ack",
+        &["collection", "create", "app", "notes", "--format", "json"],
+    );
+    let objects = dir.path().join(".git").join("objects");
+    set_tree_writable(&objects, false);
+    if fs::write(objects.join("probe"), b"x").is_ok() {
+        set_tree_writable(&objects, true);
+        return;
+    }
+    let result = succeed(
+        dir.path(),
+        "write",
+        &["insert", "app", "notes", "a1", "--data", r#"{"t":1}"#],
+    );
+    assert_eq!(result["deferred"]["step"], "git");
+    assert!(result["deferred"]["message"].as_str().is_some());
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(dir.path())
+        .args(["insert", "app", "notes", "a2", "--data", r#"{"t":2}"#])
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).expect("stderr is text");
+    assert!(
+        stderr.contains("warning: the write is committed; git will finish on the next write ("),
+        "{stderr}"
+    );
+    let found = succeed(dir.path(), "get", &["get", "app", "notes", "a2"]);
+    assert_eq!(found["doc"]["t"], 2);
+    let status = succeed(dir.path(), "status", &["status"]);
+    let warning = status["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .find(|warning| warning["code"] == "git_commit_pending")
+        .cloned()
+        .expect("a pending commit warning");
+    assert_eq!(warning["details"]["transactions"], 2);
+    set_tree_writable(&objects, true);
+    succeed(
+        dir.path(),
+        "write",
+        &["insert", "app", "notes", "a3", "--data", r#"{"t":3}"#],
+    );
+    let subjects = git(dir.path(), &["log", "--format=%s", "-3"]);
+    assert_eq!(
+        subjects,
+        "insert app/notes/a3\ninsert app/notes/a2\ninsert app/notes/a1"
+    );
+}

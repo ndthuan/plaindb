@@ -17,7 +17,16 @@
         "additionalProperties": false
       }
     },
-    "push": { "enum": ["ok", "failed", "remote_ahead", "deferred"] }
+    "push": { "enum": ["ok", "failed", "remote_ahead", "deferred"] },
+    "deferred": {
+      "type": "object",
+      "properties": {
+        "step": { "enum": ["files", "git", "finish"] },
+        "message": { "type": "string" }
+      },
+      "required": ["step", "message"],
+      "additionalProperties": false
+    }
   },
   "required": ["tx_id", "results"],
   "additionalProperties": false

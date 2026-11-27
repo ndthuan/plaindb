@@ -32,7 +32,13 @@ impl Store {
         let tx_id = new_id();
         let plan = git::plan_admin(&self.root, &read_config(&self.root)?, &tx_id, subject)?;
         let journal = plan.into_journal(tx_id, generation, entries);
-        journal::commit(&self.root, &mut self.writer(), &journal)?;
+        if let Some(deferred) = journal::commit(&self.root, &mut self.writer(), &journal)? {
+            tracing::warn!(
+                "the write is committed; {} will finish on the next write ({})",
+                deferred.step,
+                deferred.message
+            );
+        }
         let current = self.snapshot.load_full();
         self.snapshot
             .store(Arc::new(scan::rescan(&self.root, &current)?));

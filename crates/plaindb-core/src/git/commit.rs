@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -82,6 +83,30 @@ fn open_index(repo: &gix::Repository) -> Result<gix::index::File> {
             gix::index::State::new(repo.object_hash()),
             repo.index_path(),
         ))
+    }
+}
+
+const INDEX_ATTEMPTS: usize = 5;
+const INDEX_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+fn index_is_locked(repo: &gix::Repository) -> bool {
+    let mut lock = repo.index_path().into_os_string();
+    lock.push(".lock");
+    Path::new(&lock).exists()
+}
+
+fn update_index_or_warn(repo: &gix::Repository, root: &Path, changes: &[Change]) {
+    for attempt in 1..=INDEX_ATTEMPTS {
+        match update_index(repo, root, changes) {
+            Ok(()) => return,
+            Err(_) if attempt < INDEX_ATTEMPTS && index_is_locked(repo) => {
+                std::thread::sleep(INDEX_RETRY_DELAY);
+            }
+            Err(error) => {
+                tracing::warn!("the git index was not updated: {}", error.message);
+                return;
+            }
+        }
     }
 }
 
@@ -182,7 +207,7 @@ pub(crate) fn commit_changes(
         }
     };
     crate::hooks::after_git_commit();
-    update_index(&repo, root, changes)?;
+    update_index_or_warn(&repo, root, changes);
     record_commit(root, &repo, id)?;
     Ok(id)
 }

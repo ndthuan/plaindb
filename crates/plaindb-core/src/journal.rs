@@ -14,13 +14,16 @@ use crate::atomic::{
 use crate::boot::boot_id;
 use crate::config::Durability;
 use crate::error::{Error, ErrorCode, Result};
-use crate::git::{PendingTx, commit_journal};
+use crate::git::{
+    PendingTx, add_missing_commit, commit_journal, commits_are_missing, read_missing_commits,
+    retry_missing_commits,
+};
 use crate::hooks;
 use crate::scan::{GENERATION_FILE, read_generation};
 use crate::store::{STATE_DIR, WriterState};
 use crate::txlog::file_stamp;
 use crate::version::version_of;
-use crate::write::TxResult;
+use crate::write::{Deferred, TxResult};
 
 pub const JOURNAL_FILE: &str = "journal.jsonl";
 
@@ -259,19 +262,28 @@ fn finish(root: &Path, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
-fn roll_forward(
-    root: &Path,
-    journal: &Journal,
-    unfinished: usize,
-    durability: Durability,
-) -> Result<()> {
+fn recovery_failed(error: Error) -> Error {
+    Error {
+        code: ErrorCode::Io,
+        ..error
+    }
+    .with_detail("reason", "recovery_failed")
+}
+
+fn roll_forward(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
     for entry in &journal.entries {
         entry.apply(root, durability, Replay::Always)?;
     }
     if journal.commit_pending {
-        commit_journal(root, journal, unfinished)?;
+        add_missing_commit(root, &journal.tx_id, None)?;
     }
     finish(root, journal)
+}
+
+fn make_missing_commits(root: &Path, journals: &[Journal]) {
+    if let Err(error) = retry_missing_commits(root, journals) {
+        tracing::warn!("the missing git commits will be retried: {}", error.message);
+    }
 }
 
 fn replay_settled(
@@ -319,7 +331,48 @@ fn remember(root: &Path, state: &mut WriterState, journals: &[Journal]) -> Resul
     Ok(())
 }
 
-pub(crate) fn commit(root: &Path, state: &mut WriterState, journal: &Journal) -> Result<()> {
+fn deferred(step: &str, error: &Error) -> Deferred {
+    Deferred {
+        step: step.to_owned(),
+        message: error.message.clone(),
+    }
+}
+
+fn apply_files(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
+    hooks::after_files(0);
+    for (index, entry) in journal.entries.iter().enumerate() {
+        entry.apply(root, durability, Replay::Always)?;
+        hooks::after_files(index + 1);
+    }
+    Ok(())
+}
+
+fn make_commit(root: &Path, journal: &Journal) -> Result<()> {
+    if let Some(missing) = read_missing_commits(root)? {
+        return Err(Error::new(
+            ErrorCode::Io,
+            format!("earlier commits are missing: {}", missing.message),
+        ));
+    }
+    hooks::before_git_commit();
+    commit_journal(root, journal, 1)
+}
+
+fn defer_commit(root: &Path, journal: &Journal, error: &Error) -> Deferred {
+    if let Err(record_error) = add_missing_commit(root, &journal.tx_id, Some(&error.message)) {
+        tracing::warn!(
+            "the missing commit could not be recorded: {}",
+            record_error.message
+        );
+    }
+    deferred("git", error)
+}
+
+pub(crate) fn commit(
+    root: &Path,
+    state: &mut WriterState,
+    journal: &Journal,
+) -> Result<Option<Deferred>> {
     let durability = state.durability;
     let path = journal_path(root);
     let in_step = state.journal_seen == Some(file_stamp(&path)?);
@@ -327,18 +380,32 @@ pub(crate) fn commit(root: &Path, state: &mut WriterState, journal: &Journal) ->
     state.journal_seen = None;
     append(root, journal, durability)?;
     hooks::after_journal();
-    hooks::after_files(0);
-    for (index, entry) in journal.entries.iter().enumerate() {
-        entry.apply(root, durability, Replay::Always)?;
-        hooks::after_files(index + 1);
+    if let Err(error) = apply_files(root, journal, durability) {
+        tracing::warn!(
+            "the files of a committed write will be finished later: {}",
+            error.message
+        );
+        return Ok(Some(deferred("files", &error)));
     }
-    if journal.commit_pending {
-        hooks::before_git_commit();
-        commit_journal(root, journal, 1)?;
+    let mut outcome = None;
+    if journal.commit_pending
+        && let Err(error) = make_commit(root, journal)
+    {
+        tracing::warn!(
+            "the git commit of a write will be made later: {}",
+            error.message
+        );
+        outcome = Some(defer_commit(root, journal, &error));
     }
-    finish(root, journal)?;
-    if in_step {
-        state.journal_seen = Some(file_stamp(&path)?);
+    if let Err(error) = finish(root, journal) {
+        tracing::warn!(
+            "a committed write will be finished later: {}",
+            error.message
+        );
+        return Ok(Some(deferred("finish", &error)));
+    }
+    if in_step && let Ok(stamp) = file_stamp(&path) {
+        state.journal_seen = Some(stamp);
         if let Some(result) = &journal.result {
             state.journaled.push(result.clone());
         }
@@ -353,12 +420,12 @@ pub(crate) fn commit(root: &Path, state: &mut WriterState, journal: &Journal) ->
             error.message
         );
     }
-    Ok(())
+    Ok(outcome)
 }
 
 pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
     let path = journal_path(root);
-    if state.journal_seen == Some(file_stamp(&path)?) {
+    if !commits_are_missing(root) && state.journal_seen == Some(file_stamp(&path)?) {
         return Ok(false);
     }
     state.journal_seen = None;
@@ -369,11 +436,12 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
         .filter(|journal| journal.generation > generation)
         .collect();
     if !unfinished.is_empty() {
-        remove_stray_temp_files(root, &journals)?;
+        remove_stray_temp_files(root, &journals).map_err(recovery_failed)?;
     }
     for journal in &unfinished {
-        roll_forward(root, journal, unfinished.len(), state.durability)?;
+        roll_forward(root, journal, state.durability).map_err(recovery_failed)?;
     }
+    make_missing_commits(root, &journals);
     remember(root, state, &journals)?;
     Ok(!unfinished.is_empty())
 }
@@ -381,24 +449,22 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
 pub(crate) fn recover(root: &Path, state: &mut WriterState) -> Result<bool> {
     state.journal_seen = None;
     let journals = read_settled(root)?;
-    remove_stray_temp_files(root, &journals)?;
+    remove_stray_temp_files(root, &journals).map_err(recovery_failed)?;
     if journals.is_empty() {
         remember(root, state, &journals)?;
         return Ok(false);
     }
     let generation = read_generation(root)?;
-    let unfinished = journals
-        .iter()
-        .filter(|journal| journal.generation > generation)
-        .count();
     let boot = boot_id();
     for (index, journal) in journals.iter().enumerate() {
         if journal.generation > generation {
-            roll_forward(root, journal, unfinished, state.durability)?;
+            roll_forward(root, journal, state.durability).map_err(recovery_failed)?;
         } else if boot.is_none() || journal.boot != boot {
-            replay_settled(root, journal, &journals[index + 1..], state.durability)?;
+            replay_settled(root, journal, &journals[index + 1..], state.durability)
+                .map_err(recovery_failed)?;
         }
     }
+    make_missing_commits(root, &journals);
     remember(root, state, &journals)?;
     checkpoint(root, state)?;
     Ok(true)
@@ -422,6 +488,9 @@ pub(crate) fn checkpoint(root: &Path, state: &mut WriterState) -> Result<()> {
     let durability = state.durability;
     let records = read_records(root)?;
     if records.file_len == 0 {
+        return Ok(());
+    }
+    if commits_are_missing(root) {
         return Ok(());
     }
     let generation = read_generation(root)?;

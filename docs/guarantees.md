@@ -11,4 +11,6 @@ Each line below is backed by tests named in [`crates/plaindb-core/tests/guarante
 - With git on, a document can be read as of any commit or time with `get --at`, and `history` lists the commits that changed it. <!-- g:time-travel -->
 - plaindb never force pushes. A push the remote refuses because it holds commits the store lacks, or because its history is unrelated, changes nothing on the remote. <!-- g:no-force-push -->
 
+A write is durable once it returns. When a step after the commit point fails (writing the files, making the git commit, or recording the new generation), the write still succeeds and its result carries `deferred` with that step and the error, for example `"deferred":{"step":"git","message":"..."}`. The command exits 0 and prints a warning on standard error. A missing git commit is made by the next write or open, in order and once, and `status` shows `git_commit_pending` until then; files that could not be written are finished the next time the store is opened, and opening fails with the reason `recovery_failed` until they can be.
+
 What plaindb does not promise: durability beyond the level chosen in [Durability](durability.md), and anything about files changed while a write is running.

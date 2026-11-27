@@ -48,4 +48,4 @@ pub use query::{Cond, Dir, Filter, FindResult, Query};
 pub use snapshot::{InvalidFile, Snapshot, Status, Warning};
 pub use store::{Store, Version};
 pub use version::version_of;
-pub use write::{Op, OpResult, Tx, TxResult};
+pub use write::{Deferred, Op, OpResult, Tx, TxResult};

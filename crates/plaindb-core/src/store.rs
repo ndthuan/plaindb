@@ -417,6 +417,18 @@ impl Store {
                 details,
             });
         }
+        if let Some(missing) = git::read_missing_commits(&self.root)? {
+            status.warnings.push(Warning {
+                code: git::GIT_COMMIT_PENDING_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.clone(),
+                details: serde_json::json!({
+                    "transactions": missing.tx_ids.len(),
+                    "message": missing.message,
+                }),
+            });
+        }
         if status.git.enabled
             && status.git.push == crate::config::PushMode::OnCommit
             && !status.git.git_binary_found

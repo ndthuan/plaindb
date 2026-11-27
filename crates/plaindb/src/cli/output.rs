@@ -16,6 +16,7 @@ pub struct Output {
     pub result: Value,
     pub human: Human,
     pub exit_code: u8,
+    pub warnings: Vec<String>,
 }
 
 impl Output {
@@ -24,6 +25,7 @@ impl Output {
             result,
             human: Human::Pretty,
             exit_code: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -32,6 +34,7 @@ impl Output {
             result,
             human: Human::Lines(lines),
             exit_code: 0,
+            warnings: Vec::new(),
         }
     }
 
@@ -40,7 +43,13 @@ impl Output {
             result: Value::Null,
             human: Human::Streamed,
             exit_code: 0,
+            warnings: Vec::new(),
         }
+    }
+
+    pub fn with_warning(mut self, warning: String) -> Self {
+        self.warnings.push(warning);
+        self
     }
 
     pub fn with_exit_code(mut self, exit_code: u8) -> Self {
@@ -53,6 +62,7 @@ impl Output {
             result,
             human: Human::Text(text.into()),
             exit_code: 0,
+            warnings: Vec::new(),
         }
     }
 }
@@ -85,6 +95,9 @@ pub fn print_success(json: bool, output: &Output) {
     if json {
         write_line(stdout, &success_envelope(&output.result).to_string());
         return;
+    }
+    for warning in &output.warnings {
+        write_line(io::stderr().lock(), &format!("warning: {warning}"));
     }
     match &output.human {
         Human::Pretty => write_line(

@@ -74,6 +74,12 @@ pub struct OpResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deferred {
+    pub step: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxResult {
     pub tx_id: String,
     #[serde(default)]
@@ -81,6 +87,8 @@ pub struct TxResult {
     pub results: Vec<OpResult>,
     #[serde(skip)]
     pub push: Option<PushOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<Deferred>,
 }
 
 pub fn now_timestamp() -> String {
@@ -613,6 +621,7 @@ impl Store {
                 generation: snapshot.generation,
                 results,
                 push: None,
+                deferred: None,
             });
         }
         check_indexes(&snapshot, &targets)?;
@@ -623,6 +632,7 @@ impl Store {
             generation,
             results,
             push: None,
+            deferred: None,
         };
         let entries = targets
             .iter()
@@ -643,9 +653,9 @@ impl Store {
         )?;
         let mut journal = plan.into_journal(result.tx_id.clone(), generation, entries);
         journal.result = Some(result.clone());
-        journal::commit(&self.root, &mut self.writer(), &journal)?;
-        self.publish(&snapshot, generation, &targets)?;
-        Ok(result)
+        let deferred = journal::commit(&self.root, &mut self.writer(), &journal)?;
+        self.publish(&snapshot, generation, &targets);
+        Ok(TxResult { deferred, ..result })
     }
 
     fn check_disk(&self, snapshot: &Snapshot, targets: &[Target]) -> Result<()> {
@@ -679,14 +689,13 @@ impl Store {
         .with_detail("reason", "changed_on_disk"))
     }
 
-    fn publish(&self, snapshot: &Snapshot, generation: u64, targets: &[Target]) -> Result<()> {
+    fn publish(&self, snapshot: &Snapshot, generation: u64, targets: &[Target]) {
         let mut next = snapshot.clone();
         next.generation = generation;
         let mut touched: BTreeSet<(&str, &str)> = BTreeSet::new();
         for target in targets {
             let entry = match &target.next {
                 Some(pending) => {
-                    let metadata = fs::metadata(self.root.join(target.relative_path()))?;
                     let mut entry = FileEntry {
                         id: target.id.clone(),
                         size: 0,
@@ -698,7 +707,9 @@ impl Store {
                             id_mismatch: false,
                         }),
                     };
-                    scan::stamp(&mut entry, &metadata);
+                    if let Ok(metadata) = fs::metadata(self.root.join(target.relative_path())) {
+                        scan::stamp(&mut entry, &metadata);
+                    }
                     Some(entry)
                 }
                 None => None,
@@ -714,6 +725,5 @@ impl Store {
             });
         }
         self.snapshot.store(Arc::new(next));
-        Ok(())
     }
 }

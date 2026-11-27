@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::json;
 
 use super::command::{self, run_git};
-use super::{GIT_DIR, GitStatus, gc, read_warning, status_at};
+use super::{GIT_DIR, GitStatus, gc, missing, read_warning, status_at};
 use crate::config::{PushMode, StoreConfig};
 use crate::doctor::{Check, DoctorOptions, Group};
 
@@ -40,6 +40,7 @@ pub(crate) fn checks(root: &Path, config: &StoreConfig, options: DoctorOptions) 
         remote_ahead_check(&status),
         last_push_check(&status),
         lock_files_check(root),
+        missing_commits_check(root),
         foreign_check(root),
         housekeeping_check(root, config, &status),
     ]
@@ -279,6 +280,31 @@ fn lock_files_check(root: &Path) -> Check {
     )
     .with_details(json!({ "locks": listing }))
     .with_fix("wait for the operation to finish and run plaindb doctor again")
+}
+
+fn missing_commits_check(root: &Path) -> Check {
+    match missing::read(root) {
+        Ok(Some(found)) => Check::error(
+            Group::Git,
+            "git_pending_commits",
+            format!(
+                "{} committed writes have no git commit yet: {}",
+                found.tx_ids.len(),
+                found.message
+            ),
+        )
+        .with_details(json!({ "transactions": found.tx_ids.len(), "message": found.message }))
+        .with_fix(format!(
+            "remove the cause (for a stale lock: rm {}), then run any write or plaindb commit",
+            root.join(GIT_DIR).join("index.lock").display()
+        )),
+        _ => Check::ok(
+            Group::Git,
+            "git_pending_commits",
+            "every committed write has its git commit",
+        )
+        .with_details(json!({ "transactions": 0 })),
+    }
 }
 
 fn foreign_check(root: &Path) -> Check {

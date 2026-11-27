@@ -130,12 +130,22 @@ fn write_output(result: &TxResult) -> Output {
     if let Some(push) = result.push {
         value["push"] = serde_json::to_value(push).unwrap_or_default();
     }
+    if let Some(deferred) = &result.deferred {
+        value["deferred"] = json!({ "step": deferred.step, "message": deferred.message });
+    }
     let lines = result
         .results
         .iter()
         .map(|entry| format!("{} {}", entry.id, entry.version.as_deref().unwrap_or("-")))
         .collect();
-    Output::lines(value, lines)
+    let output = Output::lines(value, lines);
+    match &result.deferred {
+        Some(deferred) => output.with_warning(format!(
+            "the write is committed; {} will finish on the next write ({})",
+            deferred.step, deferred.message
+        )),
+        None => output,
+    }
 }
 
 pub fn apply(context: &Context, ops: Vec<Op>) -> Result<Output> {

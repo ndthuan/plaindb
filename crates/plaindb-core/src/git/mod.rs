@@ -5,6 +5,7 @@ mod foreign;
 mod gc;
 mod history;
 mod message;
+mod missing;
 mod pending;
 mod push;
 
@@ -29,12 +30,17 @@ pub use command::GIT_BINARY_ENV;
 pub use gc::{GcOutcome, GcReport};
 pub use history::{At, DEFAULT_HISTORY_LIMIT, HistoryEntry};
 pub use message::{ACTOR_TRAILER, OP_COUNT_TRAILER, TX_ID_TRAILER};
+pub use missing::{GIT_COMMIT_PENDING_WARNING, MISSING_COMMITS_FILE, MissingCommits};
 pub use pending::PendingTx;
 pub use push::PushOutcome;
 
 pub(crate) use commit::commit_journal;
 pub(crate) use doctor::checks as doctor_checks;
 pub(crate) use foreign::check_head;
+pub(crate) use missing::{
+    add as add_missing_commit, exists as commits_are_missing, read as read_missing_commits,
+    retry as retry_missing_commits,
+};
 pub(crate) use pending::append as append_pending;
 
 pub const GITIGNORE_FILE: &str = ".gitignore";
