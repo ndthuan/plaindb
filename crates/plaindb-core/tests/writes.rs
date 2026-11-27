@@ -856,3 +856,38 @@ fn a_file_changed_on_disk_names_the_operation_that_writes_it() {
     assert_eq!(error.details["reason"], json!("changed_on_disk"));
     assert_eq!(error.details["op_index"], 1);
 }
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+#[test]
+fn a_patched_document_keeps_the_mode_of_its_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_users(temp.path());
+    one(&store, insert("users", "u1", json!({"name": "Ada"}))).unwrap();
+    let path = users(temp.path()).join("u1.json");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    one(&store, patch("users", "u1", json!({"name": "Grace"}), None)).unwrap();
+    assert_eq!(mode_of(&path), 0o640);
+    let (found, _) = store.get("main", "users", "u1").unwrap().unwrap();
+    assert_eq!(found["name"], json!("Grace"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_document_takes_the_default_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_users(temp.path());
+    one(&store, insert("users", "u1", json!({"name": "Ada"}))).unwrap();
+    let reference = temp.path().join("reference");
+    fs::write(&reference, b"{}").unwrap();
+    assert_eq!(
+        mode_of(&users(temp.path()).join("u1.json")),
+        mode_of(&reference)
+    );
+}

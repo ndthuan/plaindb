@@ -132,6 +132,20 @@ fn temp_path(path: &Path) -> Result<PathBuf> {
     Ok(dir.join(format!(".{name}{TEMP_MARKER}{}", ulid::Ulid::generate())))
 }
 
+#[cfg(unix)]
+fn keep_mode(file: &File, path: &Path) -> Result<()> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(file.set_permissions(metadata.permissions())?),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_mode(_file: &File, _path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn replace_with(path: &Path, bytes: &[u8], durability: Durability, ordered: bool) -> Result<()> {
     replace_by(path, durability, ordered, |file| Ok(file.write_all(bytes)?))
 }
@@ -148,6 +162,7 @@ fn replace_by(
     let written = (|| -> Result<()> {
         let mut file = File::create(&temp)?;
         fill(&mut file)?;
+        keep_mode(&file, path)?;
         if ordered {
             order(&file, durability)?;
         } else {
