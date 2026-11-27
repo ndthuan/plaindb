@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-const READ_TOOLS: [&str; 11] = [
+const READ_TOOLS: [&str; 12] = [
     "plaindb_status",
     "plaindb_doctor",
     "plaindb_list_dbs",
@@ -22,14 +22,17 @@ const READ_TOOLS: [&str; 11] = [
     "plaindb_count",
     "plaindb_distinct",
     "plaindb_history",
+    "plaindb_get_file",
 ];
 
-const WRITE_TOOLS: [&str; 12] = [
+const WRITE_TOOLS: [&str; 14] = [
     "plaindb_insert",
     "plaindb_put",
     "plaindb_patch",
     "plaindb_delete",
     "plaindb_tx",
+    "plaindb_put_file",
+    "plaindb_delete_file",
     "plaindb_create_db",
     "plaindb_create_collection",
     "plaindb_set_schema",
@@ -838,4 +841,104 @@ fn a_server_prints_no_command_line_envelope_even_with_json() {
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let stderr = String::from_utf8(output.stderr).expect("stderr is text");
     assert!(stderr.contains("error[not_a_store]"), "{stderr}");
+}
+
+const PHOTO_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+async fn note_with_photo(session: &Session) -> Value {
+    prepare(session).await;
+    succeed(
+        session,
+        "plaindb_insert",
+        json!({"db": "app", "collection": "notes", "id": "n1", "doc": {"title": "One"}}),
+    )
+    .await;
+    succeed(
+        session,
+        "plaindb_put_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "photo.png", "data_base64": PHOTO_BASE64}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_file_put_through_a_tool_comes_back_byte_for_byte() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    let put = note_with_photo(&session).await;
+    assert_matches_schema("file_put", &put);
+    assert_eq!(put["file"]["mime"], "image/png");
+    assert_eq!(put["file"]["size"], 70);
+    let got = succeed(
+        &session,
+        "plaindb_get_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "photo.png"}),
+    )
+    .await;
+    assert_eq!(got["data_base64"], PHOTO_BASE64);
+    assert_eq!(got["sha256"], put["file"]["sha256"]);
+    assert_eq!(got["name"], "photo.png");
+    let on_disk = fs::read(store.join("app/notes/_files/n1/photo.png")).expect("the file exists");
+    assert_eq!(on_disk.len(), 70);
+    let deleted = succeed(
+        &session,
+        "plaindb_delete_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "photo.png"}),
+    )
+    .await;
+    assert_matches_schema("file_rm", &deleted);
+    let gone = call(
+        &session,
+        "plaindb_get_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "photo.png"}),
+    )
+    .await;
+    assert!(gone.is_error);
+    assert_eq!(gone.value["code"], "not_found");
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn put_file_refuses_bad_base64_and_files_over_the_limit() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    note_with_photo(&session).await;
+    let bad = call(
+        &session,
+        "plaindb_put_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "a.bin", "data_base64": "not base64!"}),
+    )
+    .await;
+    assert!(bad.is_error);
+    assert_eq!(bad.value["code"], "invalid_document");
+    assert_eq!(
+        cli(&store, &["config", "set", "limits.max_file_bytes", "10"])["ok"],
+        true
+    );
+    let big = call(
+        &session,
+        "plaindb_put_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "b.png", "data_base64": PHOTO_BASE64}),
+    )
+    .await;
+    assert!(big.is_error);
+    assert_eq!(big.value["code"], "limit_exceeded");
+    assert_eq!(big.value["details"]["limit"], "max_file_bytes");
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn delete_file_honours_if_version() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    note_with_photo(&session).await;
+    let stale = call(
+        &session,
+        "plaindb_delete_file",
+        json!({"db": "app", "collection": "notes", "id": "n1", "name": "photo.png", "if_version": "0000"}),
+    )
+    .await;
+    assert!(stale.is_error);
+    assert_eq!(stale.value["code"], "version_conflict");
+    session.cancel().await.expect("the server stops");
 }

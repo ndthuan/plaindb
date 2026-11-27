@@ -228,6 +228,55 @@ pub struct DeleteInput {
     pub tx_id: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutFileInput {
+    pub db: String,
+    pub collection: String,
+    #[schemars(description = "Id of the document the file is attached to")]
+    pub id: String,
+    #[schemars(description = "Name of the file within the document, such as photo.png")]
+    pub name: String,
+    #[schemars(description = "The bytes of the file in standard base64")]
+    pub data_base64: String,
+    #[schemars(description = "MIME type; guessed from the name when left out")]
+    pub mime: Option<String>,
+    #[schemars(description = "Write only when the document is at this version")]
+    pub if_version: Option<String>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetFileInput {
+    pub db: String,
+    pub collection: String,
+    #[schemars(description = "Id of the document the file is attached to")]
+    pub id: String,
+    #[schemars(description = "Name of the file within the document")]
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteFileInput {
+    pub db: String,
+    pub collection: String,
+    #[schemars(description = "Id of the document the file is attached to")]
+    pub id: String,
+    #[schemars(description = "Name of the file within the document")]
+    pub name: String,
+    #[schemars(description = "Write only when the document is at this version")]
+    pub if_version: Option<String>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TxKind {

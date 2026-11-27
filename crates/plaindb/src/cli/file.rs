@@ -69,28 +69,57 @@ fn read_source(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
-fn described(name: &str, meta: &FileMeta) -> Value {
+pub fn described(name: &str, meta: &FileMeta) -> Value {
     json!({ "name": name, "size": meta.size, "sha256": meta.sha256, "mime": meta.mime })
 }
 
-pub fn put(context: &Context, args: &FilePutArgs) -> Result<Output> {
-    let bytes = read_source(&args.from)?;
-    let meta = FileMeta::of(&args.name, &bytes, args.mime.as_deref());
+pub struct Attachment {
+    pub db: String,
+    pub coll: String,
+    pub id: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub mime: Option<String>,
+    pub if_version: Option<String>,
+}
+
+pub fn attach(context: &Context, attachment: Attachment) -> Result<Output> {
+    let meta = FileMeta::of(
+        &attachment.name,
+        &attachment.bytes,
+        attachment.mime.as_deref(),
+    );
+    let described = described(&attachment.name, &meta);
     let result = apply_tx(
         context,
         vec![Op::AttachFile {
+            db: attachment.db,
+            coll: attachment.coll,
+            id: attachment.id,
+            name: attachment.name,
+            bytes: attachment.bytes,
+            mime: attachment.mime,
+            if_version: attachment.if_version,
+        }],
+    )?;
+    let mut output = write_output(&result);
+    output.result["file"] = described;
+    Ok(output)
+}
+
+pub fn put(context: &Context, args: &FilePutArgs) -> Result<Output> {
+    attach(
+        context,
+        Attachment {
             db: args.db.clone(),
             coll: args.coll.clone(),
             id: args.id.clone(),
             name: args.name.clone(),
-            bytes,
+            bytes: read_source(&args.from)?,
             mime: args.mime.clone(),
             if_version: args.if_version.clone(),
-        }],
-    )?;
-    let mut output = write_output(&result);
-    output.result["file"] = described(&args.name, &meta);
-    Ok(output)
+        },
+    )
 }
 
 pub fn get(context: &Context, args: &FileGetArgs, json: bool) -> Result<Output> {
@@ -135,7 +164,7 @@ pub fn list(context: &Context, args: &FileListArgs) -> Result<Output> {
 }
 
 pub fn rm(context: &Context, args: &FileRmArgs) -> Result<Output> {
-    let result = apply_tx(
+    super::write::apply(
         context,
         vec![Op::DetachFile {
             db: args.db.clone(),
@@ -144,6 +173,5 @@ pub fn rm(context: &Context, args: &FileRmArgs) -> Result<Output> {
             name: args.name.clone(),
             if_version: args.if_version.clone(),
         }],
-    )?;
-    Ok(write_output(&result))
+    )
 }

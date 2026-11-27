@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use plaindb_core::{Error, Op};
 use rmcp::model::JsonObject;
 use schemars::JsonSchema;
@@ -9,9 +11,11 @@ use serde_json::Value;
 
 use super::inputs::{
     AddIndexInput, CollectionInput, CommitInput, CountInput, CreateCollectionInput, DbInput,
-    DeleteInput, DistinctInput, DoctorInput, DropIndexInput, FindInput, GetInput, HistoryInput,
-    InsertInput, NoInput, PatchInput, PushInput, PutInput, SetSchemaInput, TxInput,
+    DeleteFileInput, DeleteInput, DistinctInput, DoctorInput, DropIndexInput, FindInput,
+    GetFileInput, GetInput, HistoryInput, InsertInput, NoInput, PatchInput, PushInput,
+    PutFileInput, PutInput, SetSchemaInput, TxInput,
 };
+use crate::cli::file::{Attachment, attach, described};
 use crate::cli::output::Output;
 use crate::cli::{Context, admin, doctor, git, read, write};
 
@@ -84,6 +88,15 @@ where
             run(context, input)
         }),
     }
+}
+
+fn decode_base64(text: &str) -> Result<Vec<u8>, Failure> {
+    STANDARD.decode(text).map_err(|source| {
+        Failure::Store(
+            Error::invalid_document("bad_base64", format!("data_base64 is not base64: {source}"))
+                .with_detail("field", "data_base64"),
+        )
+    })
 }
 
 fn with_tx_id(context: &Context, tx_id: Option<String>) -> Context {
@@ -251,6 +264,56 @@ pub fn catalog() -> Vec<Tool> {
                 Ok(write::apply(
                     &with_tx_id(context, input.tx_id),
                     write::parse_ops(ops)?,
+                )?)
+            },
+        ),
+        tool(
+            Write,
+            "plaindb_put_file",
+            "Attaches a file, given in base64, to a document, replacing one of the same name; if_version guards against lost updates.",
+            |context, input: PutFileInput| {
+                let bytes = decode_base64(&input.data_base64)?;
+                Ok(attach(
+                    &with_tx_id(context, input.tx_id),
+                    Attachment {
+                        db: input.db,
+                        coll: input.collection,
+                        id: input.id,
+                        name: input.name,
+                        bytes,
+                        mime: input.mime,
+                        if_version: input.if_version,
+                    },
+                )?)
+            },
+        ),
+        tool(
+            Read,
+            "plaindb_get_file",
+            "Reads a file attached to a document and returns it in base64 with its size, sha256 and mime.",
+            |context, input: GetFileInput| {
+                let store = context.open_reader()?;
+                let (meta, bytes) =
+                    store.read_file(&input.db, &input.collection, &input.id, &input.name)?;
+                let mut value = described(&input.name, &meta);
+                value["data_base64"] = Value::String(STANDARD.encode(bytes));
+                Ok(Output::pretty(value))
+            },
+        ),
+        tool(
+            Write,
+            "plaindb_delete_file",
+            "Removes a file attached to a document; if_version guards against lost updates.",
+            |context, input: DeleteFileInput| {
+                Ok(write::apply(
+                    &with_tx_id(context, input.tx_id),
+                    vec![Op::DetachFile {
+                        db: input.db,
+                        coll: input.collection,
+                        id: input.id,
+                        name: input.name,
+                        if_version: input.if_version,
+                    }],
                 )?)
             },
         ),

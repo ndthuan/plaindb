@@ -8,6 +8,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 
 - Documents can carry attached files, such as images, PDFs or audio. Each file is stored as itself in `<db>/<collection>/_files/<id>/<name>` and described in the document's system field `_files` by its size, SHA-256 and MIME type. A file is attached or detached in the same transaction, journal record and git commit as its document, and is refused over `limits.max_file_bytes` (10 MiB by default). Deleting a document removes its files, a file changed by hand is not overwritten (`version_conflict` with the reason `changed_on_disk`), and document writes cannot set `_files`.
 - `plaindb file put`, `file get`, `file list` and `file rm` attach, read, list and remove the files of a document. `file get` prints the bytes on standard output, or with `--out` writes them to a file; under `--json` it needs `--out`.
+- The MCP tools `plaindb_put_file`, `plaindb_get_file` and `plaindb_delete_file` attach, read and remove files as base64; `--read-only` offers only `plaindb_get_file` of them.
 
 ### Changed
 
