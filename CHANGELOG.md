@@ -28,6 +28,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - A cursor is tied to the filter and sort it was made for; using it with another fails with `invalid_query` and the reason `cursor_mismatch`. Cursors from earlier versions are refused with `bad_cursor`.
 - Text search normalises words to NFC, so composed and decomposed Unicode find each other, and searching all fields reaches strings inside nested objects.
 - `limits.max_results` and `limits.max_scan_ms` refuse `0` in `config set` and in `_store.json`.
+- Outside macOS, `durability: full` flushes files and directories with `fsync` instead of `fdatasync`, so it is never weaker than `normal`, which flushes directories with `fsync` too.
 
 ## [0.1.0] - 2026-11-26
 

@@ -45,7 +45,7 @@ mod platform {
     use std::io;
 
     pub(super) fn full(file: &File) -> io::Result<()> {
-        file.sync_data()
+        file.sync_all()
     }
 
     pub(super) fn barrier(file: &File) -> io::Result<()> {
@@ -85,11 +85,26 @@ pub(crate) fn parent_of(path: &Path) -> Result<&Path> {
         })
 }
 
+#[cfg(target_vendor = "apple")]
 pub(crate) fn sync_dir(dir: &Path, durability: Durability) -> Result<()> {
     if durability == Durability::Off {
         return Ok(());
     }
     flush(&File::open(dir)?, durability)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) fn sync_dir(dir: &Path, durability: Durability) -> Result<()> {
+    if durability == Durability::Off {
+        return Ok(());
+    }
+    let dir = File::open(dir)?;
+    if durability == Durability::Full {
+        hooks::full_flush();
+    }
+    hooks::dir_fsync();
+    dir.sync_all()?;
+    Ok(())
 }
 
 pub(crate) fn ensure_dir(dir: &Path, durability: Durability) -> Result<()> {

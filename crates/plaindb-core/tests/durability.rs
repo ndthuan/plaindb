@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_vendor = "apple"))]
+use plaindb_core::dir_fsync_count;
 use plaindb_core::{Doc, Durability, Format, Op, Store, StoreConfig, Tx, full_flush_count};
 use serde_json::json;
 
@@ -56,6 +58,24 @@ fn journal_lines(root: &Path) -> usize {
         .unwrap_or_default()
         .lines()
         .count()
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn dir_fsyncs_of_a_write_and_checkpoint(durability: Durability) -> u64 {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_at(temp.path(), durability);
+    let before = dir_fsync_count();
+    store.apply(put("a", 1)).unwrap();
+    store.checkpoint().unwrap();
+    dir_fsync_count() - before
+}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn directories_are_flushed_with_fsync_at_full() {
+    assert!(dir_fsyncs_of_a_write_and_checkpoint(Durability::Full) >= 1);
+    assert!(dir_fsyncs_of_a_write_and_checkpoint(Durability::Normal) >= 1);
+    assert_eq!(dir_fsyncs_of_a_write_and_checkpoint(Durability::Off), 0);
 }
 
 #[test]

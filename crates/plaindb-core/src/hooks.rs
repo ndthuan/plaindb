@@ -37,6 +37,19 @@ mod enabled {
         FULL_FLUSHES.with(Cell::get)
     }
 
+    thread_local! {
+        static DIR_FSYNCS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    pub(crate) fn dir_fsync() {
+        DIR_FSYNCS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub fn dir_fsync_count() -> u64 {
+        DIR_FSYNCS.with(Cell::get)
+    }
+
     const CRASH_STATUS: i32 = 86;
 
     fn crash() -> ! {
@@ -109,6 +122,9 @@ mod enabled {
 
     pub(crate) fn full_flush() {}
 
+    #[cfg(not(target_vendor = "apple"))]
+    pub(crate) fn dir_fsync() {}
+
     pub(crate) fn before_journal() {}
 
     pub(crate) fn after_journal() {}
@@ -126,9 +142,11 @@ mod enabled {
     pub(crate) fn after_git_commit() {}
 }
 
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) use enabled::dir_fsync;
 pub(crate) use enabled::{
     after_files, after_git_commit, after_journal, before_git_commit, before_journal, boot_id,
     during_checkpoint, full_flush, git_program,
 };
 #[cfg(feature = "test-hooks")]
-pub use enabled::{full_flush_count, set_git_program};
+pub use enabled::{dir_fsync_count, full_flush_count, set_git_program};
