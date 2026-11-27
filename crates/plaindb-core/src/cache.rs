@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,13 +21,22 @@ use crate::snapshot::{
 use crate::store::{DB_FILE, META_FILE, STATE_DIR, child_directories};
 
 pub const CACHE_FILE: &str = "index-cache.bin";
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
+pub const DECODER_REVISION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
     format: u32,
     generation: u64,
     meta_hash: String,
+    decoder_revision: u32,
+    body_hash: String,
+}
+
+impl Header {
+    fn current_at(&self, revision: u32) -> bool {
+        self.format == CACHE_FORMAT && self.decoder_revision == revision
+    }
 }
 
 #[derive(Serialize)]
@@ -124,9 +133,49 @@ fn read_metas(root: &Path) -> Result<(String, Vec<DiskMeta>)> {
             });
         }
     }
-    let digest = hasher.finalize();
-    let hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok((hash, metas))
+    Ok((hex(hasher), metas))
+}
+
+fn hex(hasher: Sha1) -> String {
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+struct Hashing<T> {
+    inner: T,
+    hasher: Sha1,
+}
+
+impl<T> Hashing<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            hasher: Sha1::new(),
+        }
+    }
+}
+
+impl<T: Read> Read for Hashing<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.hasher.update(&buf[..count]);
+        Ok(count)
+    }
+}
+
+impl<T: Write> Write for Hashing<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let count = self.inner.write(buf)?;
+        self.hasher.update(&buf[..count]);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn cache_path(root: &Path) -> PathBuf {
@@ -139,7 +188,9 @@ fn open_cache(root: &Path) -> Option<BufReader<File>> {
 
 pub fn stored_generation(root: &Path) -> Option<u64> {
     let header: Header = rmp_serde::decode::from_read(open_cache(root)?).ok()?;
-    (header.format == CACHE_FORMAT).then_some(header.generation)
+    header
+        .current_at(DECODER_REVISION)
+        .then_some(header.generation)
 }
 
 pub fn discard(root: &Path) {
@@ -153,14 +204,23 @@ pub(crate) enum CacheRead {
 }
 
 pub(crate) fn read(root: &Path) -> CacheRead {
+    read_at(root, DECODER_REVISION)
+}
+
+#[doc(hidden)]
+pub fn usable_at_revision(root: &Path, revision: u32) -> bool {
+    matches!(read_at(root, revision), CacheRead::Usable(_))
+}
+
+fn read_at(root: &Path, revision: u32) -> CacheRead {
     let Some(mut reader) = open_cache(root) else {
         return CacheRead::Missing;
     };
     let Ok(header) = rmp_serde::decode::from_read::<_, Header>(&mut reader) else {
         return CacheRead::Unusable { discard: true };
     };
-    if header.format != CACHE_FORMAT {
-        return CacheRead::Unusable { discard: false };
+    if !header.current_at(revision) {
+        return CacheRead::Unusable { discard: true };
     }
     let Ok((hash, metas)) = read_metas(root) else {
         return CacheRead::Unusable { discard: false };
@@ -168,10 +228,13 @@ pub(crate) fn read(root: &Path) -> CacheRead {
     if hash != header.meta_hash {
         return CacheRead::Unusable { discard: false };
     }
-    let Ok(body) = rmp_serde::decode::from_read::<_, Body>(&mut reader) else {
+    let mut hashing = Hashing::new(reader);
+    let Ok(body) = rmp_serde::decode::from_read::<_, Body>(&mut hashing) else {
         return CacheRead::Unusable { discard: true };
     };
-    if !reader.fill_buf().is_ok_and(<[u8]>::is_empty) {
+    if !hashing.read(&mut [0]).is_ok_and(|count| count == 0)
+        || hex(hashing.hasher) != header.body_hash
+    {
         return CacheRead::Unusable { discard: true };
     }
     match assemble(root, header.generation, body, metas) {
@@ -323,15 +386,20 @@ pub fn write(root: &Path, snapshot: &Snapshot) -> Result<()> {
             indexes: collection.indexes.dump(&lookup),
         });
     }
+    let body = BodyRef { collections };
+    let mut sink = Hashing::new(io::sink());
+    encode(&mut sink, &body)?;
     let header = Header {
         format: CACHE_FORMAT,
         generation: snapshot.generation,
         meta_hash,
+        decoder_revision: DECODER_REVISION,
+        body_hash: hex(sink.hasher),
     };
     replace_unsynced_by(&cache_path(root), |file| {
         let mut out = BufWriter::new(file);
         encode(&mut out, &header)?;
-        encode(&mut out, &BodyRef { collections })?;
+        encode(&mut out, &body)?;
         Ok(out.flush()?)
     })
 }

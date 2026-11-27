@@ -201,3 +201,91 @@ fn a_dropped_store_whose_generation_moved_refreshes_the_cache() {
     drop(store);
     assert_eq!(cache::load(dir.path()).unwrap().generation, generation);
 }
+
+fn cache_file(root: &Path) -> std::path::PathBuf {
+    root.join(".plaindb").join(cache::CACHE_FILE)
+}
+
+fn str8_end(bytes: &[u8], at: usize) -> usize {
+    assert_eq!(bytes[at], 0xd9, "a str8 at {at}");
+    at + 2 + usize::from(bytes[at + 1])
+}
+
+fn uint_end(bytes: &[u8], at: usize) -> usize {
+    match bytes[at] {
+        0x00..=0x7f => at + 1,
+        0xcc => at + 2,
+        0xcd => at + 3,
+        0xce => at + 5,
+        0xcf => at + 9,
+        other => panic!("not an unsigned integer: {other:#x}"),
+    }
+}
+
+fn as_format_one(bytes: &[u8]) -> Vec<u8> {
+    let fields = usize::from(bytes[0] & 0x0f);
+    let generation_at = uint_end(bytes, 1);
+    let hash_at = uint_end(bytes, generation_at);
+    let mut end = str8_end(bytes, hash_at);
+    if fields == 5 {
+        end = str8_end(bytes, uint_end(bytes, end));
+    }
+    let mut old = vec![0x93, 0x01];
+    old.extend_from_slice(&bytes[generation_at..str8_end(bytes, hash_at)]);
+    old.extend_from_slice(&bytes[end..]);
+    old
+}
+
+#[test]
+fn a_cache_with_a_changed_body_byte_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    populate(dir.path());
+    let path = cache_file(dir.path());
+    let mut bytes = fs::read(&path).unwrap();
+    let needle = b"user7@example.com";
+    let at = bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("the address is in the cache");
+    bytes[at] = b'v';
+    fs::write(&path, &bytes).unwrap();
+    assert!(cache::load(dir.path()).is_none());
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(
+        find(&store, "people", json!({"email": "user7@example.com"})).len(),
+        1
+    );
+    assert!(find(&store, "people", json!({"email": "vser7@example.com"})).is_empty());
+    drop(store);
+    assert!(cache::load(dir.path()).is_some());
+}
+
+#[test]
+fn a_cache_from_another_decoder_revision_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    populate(dir.path());
+    assert!(cache::usable_at_revision(
+        dir.path(),
+        cache::DECODER_REVISION
+    ));
+    assert!(!cache::usable_at_revision(
+        dir.path(),
+        cache::DECODER_REVISION + 1
+    ));
+}
+
+#[test]
+fn a_format_one_cache_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    populate(dir.path());
+    let path = cache_file(dir.path());
+    let old = as_format_one(&fs::read(&path).unwrap());
+    fs::write(&path, &old).unwrap();
+    assert!(cache::stored_generation(dir.path()).is_none());
+    assert!(cache::load(dir.path()).is_none());
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.list_ids("main", "people").unwrap().len(), 60);
+    assert_eq!(find(&store, "notes", json!({"tags": "t1"})).len(), 15);
+    drop(store);
+    assert!(cache::load(dir.path()).is_some());
+}

@@ -16,6 +16,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - A write that times out waiting for the lock no longer leaves a thread and an open file behind.
 - A damaged journal record followed by more data is kept in `.plaindb/journal.rejected-<id>` instead of being cut off, and `status` warns about it.
 - A write that reached the journal always succeeds. When a later step fails, the result carries `deferred` with the step and the error, the command prints a warning and exits 0, and `status` and `doctor` show git commits that are still to be made.
+- The index cache carries a checksum of its contents and the revision of the decoder that wrote it; a damaged cache or one from another build is ignored and rebuilt.
 
 ## [0.1.0] - 2026-11-26
 
