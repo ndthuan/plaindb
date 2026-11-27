@@ -103,6 +103,8 @@ pub(crate) fn child_directories(
     Ok(names)
 }
 
+pub const UNKNOWN_SETTING_WARNING: &str = "unknown_setting";
+
 pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
     let bytes = match fs::read(root.join(STORE_FILE)) {
         Ok(bytes) => bytes,
@@ -569,6 +571,15 @@ impl Store {
                     }),
                 });
             }
+        }
+        for key in read_config(&self.root)?.unknown.keys() {
+            status.warnings.push(Warning {
+                code: UNKNOWN_SETTING_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.join(STORE_FILE),
+                details: serde_json::json!({ "key": key }),
+            });
         }
         if read_config(&self.root)?.git_binary.is_some() {
             status.warnings.push(Warning {

@@ -10,7 +10,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::git;
 use crate::index::Indexes;
 use crate::journal::{self, JournalEntry};
-use crate::names::{new_id, validate_collection_name, validate_db_name};
+use crate::names::{new_id, validate_db_name, validate_new_collection_name, validate_new_db_name};
 use crate::scan::{self, SYSTEM_FIELDS, compile_validator};
 use crate::store::{DB_FILE, META_FILE, STORE_FILE, Store, read_config};
 
@@ -66,7 +66,7 @@ impl Store {
     }
 
     pub fn create_db(&self, db: &str) -> Result<()> {
-        validate_db_name(db)?;
+        validate_new_db_name(db)?;
         let _push = self.push_guard();
         let _lock = self.begin_write()?;
         if self.root.join(db).join(DB_FILE).is_file() {
@@ -94,7 +94,7 @@ impl Store {
 
     pub fn create_collection(&self, db: &str, collection: &str, format: Format) -> Result<()> {
         validate_db_name(db)?;
-        validate_collection_name(collection)?;
+        validate_new_collection_name(collection)?;
         let _push = self.push_guard();
         let _lock = self.begin_write()?;
         let dir = self.db_dir(db)?.join(collection);

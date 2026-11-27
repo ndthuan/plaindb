@@ -5,7 +5,7 @@ use serde_json::json;
 
 use super::{Check, Group};
 use crate::cache::{self, CacheRead};
-use crate::config::{STORE_FORMAT, StoreConfig};
+use crate::config::{SETTING_KEYS, STORE_FORMAT, StoreConfig};
 use crate::journal;
 use crate::lock::LOCK_FILE;
 use crate::scan;
@@ -23,6 +23,7 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
             format!("the store format is {}", config.format),
         )
         .with_details(json!({ "format": config.format, "supported": STORE_FORMAT })),
+        unknown_settings_check(config),
         journal_check(root),
         lock_check(root),
     ];
@@ -39,6 +40,32 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
         ),
     }
     checks
+}
+
+fn unknown_settings_check(config: &StoreConfig) -> Check {
+    if config.unknown.is_empty() {
+        return Check::ok(
+            Group::Store,
+            "store_unknown_settings",
+            "_store.json holds only settings plaindb knows",
+        )
+        .with_details(json!({ "keys": [] }));
+    }
+    let keys: Vec<&String> = config.unknown.keys().collect();
+    let names: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+    Check::warn(
+        Group::Store,
+        "store_unknown_settings",
+        format!(
+            "_store.json holds settings plaindb ignores: {}",
+            names.join(", ")
+        ),
+    )
+    .with_details(json!({ "keys": keys }))
+    .with_fix(format!(
+        "check the spelling in _store.json; known settings: {}",
+        SETTING_KEYS.join(", ")
+    ))
 }
 
 fn journal_check(root: &Path) -> Check {

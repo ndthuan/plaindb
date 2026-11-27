@@ -268,3 +268,30 @@ fn doc_path_validates_every_part() {
     assert!(store.doc_path("main", "Users", "x", Format::Json).is_err());
     assert!(store.doc_path("..", "users", "x", Format::Json).is_err());
 }
+
+#[test]
+fn new_names_may_not_start_with_a_dash_but_existing_ones_stay_usable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    for error in [store.create_db("-x").unwrap_err(), {
+        store.create_db("main").unwrap();
+        store
+            .create_collection("main", "-c", Format::Json)
+            .unwrap_err()
+    }] {
+        assert_eq!(error.code, ErrorCode::InvalidName);
+        assert_eq!(error.details["reason"], json!("leading_dash"));
+    }
+    make_collection(temp.path(), "-old", "kept", Format::Json);
+    assert_eq!(
+        store.list_dbs().unwrap(),
+        vec!["-old".to_owned(), "main".to_owned()]
+    );
+    assert_eq!(
+        store.list_collections("-old").unwrap(),
+        vec!["kept".to_owned()]
+    );
+    store
+        .create_collection("-old", "notes", Format::Json)
+        .unwrap();
+}

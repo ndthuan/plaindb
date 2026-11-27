@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -77,6 +79,8 @@ pub struct StoreConfig {
     pub durability: Durability,
     pub checkpoint_interval: u64,
     pub gc_every: u64,
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, Value>,
     #[serde(default, skip_serializing)]
     pub git_binary: Option<String>,
     pub limits: Limits,
@@ -90,6 +94,7 @@ pub const SETTING_KEYS: &[&str] = &[
     "lock_timeout_ms",
     "durability",
     "gc_every",
+    "checkpoint_interval",
     "limits.max_document_bytes",
     "limits.max_results",
     "limits.max_scan_ms",
@@ -229,6 +234,13 @@ impl StoreConfig {
             }
             "lock_timeout_ms" => self.lock_timeout_ms = parse_count(key, value)?,
             "gc_every" => self.gc_every = parse_count(key, value)?,
+            "checkpoint_interval" => {
+                let interval = parse_count(key, value)?;
+                if interval == 0 {
+                    return Err(invalid_value(key, "a whole number above 0"));
+                }
+                self.checkpoint_interval = interval;
+            }
             "git_binary" => {
                 return Err(Error::new(
                     ErrorCode::InvalidConfig,
@@ -271,6 +283,7 @@ impl Default for StoreConfig {
             durability: Durability::Full,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
             gc_every: DEFAULT_GC_EVERY,
+            unknown: BTreeMap::new(),
             git_binary: None,
             limits: Limits::default(),
         }

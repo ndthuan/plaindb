@@ -253,3 +253,34 @@ fn pending_manual_transactions_are_not_a_worktree_problem() {
     assert_eq!(check.status, CheckStatus::Ok);
     assert_eq!(check.message, "1 transactions wait for plaindb commit");
 }
+
+#[test]
+fn an_unknown_store_setting_is_a_doctor_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    Store::init(temp.path()).unwrap();
+    let path = temp.path().join("_store.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let report_for = |stored: &Value| {
+        fs::write(&path, serde_json::to_vec(stored).unwrap()).unwrap();
+        Store::open(temp.path())
+            .unwrap()
+            .doctor(DoctorOptions { offline: true })
+    };
+    let clean = report_for(&stored);
+    let check = clean
+        .checks
+        .iter()
+        .find(|check| check.id == "store_unknown_settings")
+        .expect("the check is always reported");
+    assert_eq!(check.status, CheckStatus::Ok);
+    stored["durabilty"] = json!("off");
+    let report = report_for(&stored);
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.id == "store_unknown_settings")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.message.contains("durabilty"), "{}", check.message);
+    assert!(check.fix.as_deref().unwrap().contains("known settings"));
+}

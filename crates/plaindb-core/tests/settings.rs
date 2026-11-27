@@ -211,3 +211,39 @@ fn a_store_file_that_names_a_git_program_opens_and_loses_it_on_the_next_write() 
         assert!(written.get("git_binary").is_none(), "{stored}");
     }
 }
+
+#[test]
+fn checkpoint_interval_is_a_setting_that_refuses_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    store.set_setting("checkpoint_interval", "8").unwrap();
+    assert_eq!(store.config().checkpoint_interval, 8);
+    assert_eq!(store.config().setting("checkpoint_interval").unwrap(), 8);
+    for value in ["0", "often", "-1"] {
+        let error = store.set_setting("checkpoint_interval", value).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{value}");
+    }
+    assert_eq!(store.config().checkpoint_interval, 8);
+}
+
+#[test]
+fn an_unknown_key_in_the_store_file_is_warned_about_and_kept() {
+    let temp = tempfile::tempdir().unwrap();
+    Store::init(temp.path()).unwrap();
+    let path = temp.path().join("_store.json");
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stored["durabilty"] = json!("off");
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let status = store.status().unwrap();
+    let warning = status
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "unknown_setting")
+        .expect("a warning");
+    assert_eq!(warning.details["key"], json!("durabilty"));
+    store.set_setting("gc_every", "100").unwrap();
+    let rewritten: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rewritten["durabilty"], json!("off"));
+    assert_eq!(rewritten["gc_every"], json!(100));
+}

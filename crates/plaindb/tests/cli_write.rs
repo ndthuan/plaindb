@@ -705,7 +705,7 @@ fn init_refuses_a_directory_that_holds_a_store() {
     assert_eq!(
         fail(
             dir.path(),
-            &["init", "--remote", "https://example.com/x.git"]
+            &["init", "--git", "--remote", "https://example.com/x.git"]
         ),
         "already_exists"
     );
@@ -1123,5 +1123,100 @@ fn an_unknown_push_mode_is_refused() {
         dir.path(),
         "config",
         &["config", "set", "push", "background"],
+    );
+}
+
+#[test]
+fn a_new_name_may_not_start_with_a_dash() {
+    let dir = store_with_collection("json");
+    for args in [
+        vec!["db", "create", "--", "-x"],
+        vec![
+            "collection",
+            "create",
+            "app",
+            "--format",
+            "json",
+            "--",
+            "-c",
+        ],
+    ] {
+        let run = plaindb(dir.path(), None, &args);
+        assert_eq!(run.code, 1, "{args:?}: {}", run.json);
+        assert_eq!(run.json["error"]["code"], "invalid_name");
+        assert_eq!(run.json["error"]["details"]["reason"], "leading_dash");
+    }
+    succeed(dir.path(), "db_ack", &["db", "create", "old"]);
+    succeed(
+        dir.path(),
+        "collection_ack",
+        &["collection", "create", "old", "kept", "--format", "json"],
+    );
+    fs::rename(dir.path().join("old"), dir.path().join("-old")).expect("renamed");
+    assert_eq!(
+        succeed(dir.path(), "dbs", &["db", "list"])["dbs"],
+        json!(["-old", "app"])
+    );
+    succeed(dir.path(), "find", &["find", "--", "-old", "kept"]);
+    succeed(
+        dir.path(),
+        "collection_ack",
+        &[
+            "collection",
+            "create",
+            "--format",
+            "json",
+            "--",
+            "-old",
+            "notes",
+        ],
+    );
+}
+
+#[test]
+fn checkpoint_interval_is_a_setting() {
+    let dir = store_with_collection("json");
+    let set = succeed(
+        dir.path(),
+        "config",
+        &["config", "set", "checkpoint_interval", "8"],
+    );
+    assert_eq!(set["value"], 8);
+    assert_eq!(
+        succeed(
+            dir.path(),
+            "config",
+            &["config", "get", "checkpoint_interval"]
+        )["value"],
+        8
+    );
+    assert_eq!(
+        fail(dir.path(), &["config", "set", "checkpoint_interval", "0"]),
+        "invalid_config"
+    );
+}
+
+#[test]
+fn init_refuses_git_options_without_git_before_creating_anything() {
+    for (args, message) in [
+        (
+            vec!["init", "--remote", "/tmp/x.git"],
+            "--remote needs --git",
+        ),
+        (vec!["init", "--push", "on-commit"], "--push needs --git"),
+        (vec!["init", "--commit", "manual"], "--commit needs --git"),
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let run = plaindb(dir.path(), None, &args);
+        assert_eq!(run.code, 1, "{args:?}: {}", run.json);
+        assert_eq!(run.json["error"]["code"], "invalid_config");
+        assert_eq!(run.json["error"]["message"], message);
+        assert_eq!(fs::read_dir(dir.path()).expect("a directory").count(), 0);
+    }
+    let dir = tempfile::tempdir().expect("a temp dir");
+    succeed(
+        dir.path(),
+        "init",
+        &["init", "--git", "--remote", "/tmp/x.git"],
     );
 }

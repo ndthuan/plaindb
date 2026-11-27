@@ -124,7 +124,29 @@ fn setting_output(key: Option<&str>, value: Value) -> Output {
     Output::text(json!({ "key": key, "value": value }), text)
 }
 
+fn refuse_git_options_without_git(args: &InitArgs) -> Result<()> {
+    if args.git {
+        return Ok(());
+    }
+    let needs_git = [
+        (args.remote.is_some(), "--remote"),
+        (
+            matches!(args.push, Some(PushArg::OnCommit | PushArg::Background)),
+            "--push",
+        ),
+        (matches!(args.commit, Some(CommitArg::Manual)), "--commit"),
+    ];
+    match needs_git.iter().find(|(given, _)| *given) {
+        Some((_, flag)) => Err(Error::new(
+            ErrorCode::InvalidConfig,
+            format!("{flag} needs --git"),
+        )),
+        None => Ok(()),
+    }
+}
+
 pub fn init(context: &Context, args: &InitArgs) -> Result<Output> {
+    refuse_git_options_without_git(args)?;
     let defaults = StoreConfig::default();
     let config = StoreConfig {
         git: args.git,

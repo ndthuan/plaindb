@@ -32,6 +32,24 @@ pub fn validate_collection_name(name: &str) -> Result<()> {
     validate_group_name("collection", name)
 }
 
+fn refuse_leading_dash(kind: &str, name: &str) -> Result<()> {
+    if name.starts_with('-') {
+        Err(Error::invalid_name(kind, name).with_detail("reason", "leading_dash"))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_new_db_name(name: &str) -> Result<()> {
+    validate_db_name(name)?;
+    refuse_leading_dash("db", name)
+}
+
+pub fn validate_new_collection_name(name: &str) -> Result<()> {
+    validate_collection_name(name)?;
+    refuse_leading_dash("collection", name)
+}
+
 pub fn validate_id(id: &str) -> Result<()> {
     let bytes = id.as_bytes();
     let valid = !bytes.is_empty()
