@@ -28,6 +28,7 @@ pub const STORE_FILE: &str = "_store.json";
 pub const DB_FILE: &str = "_db.json";
 pub const META_FILE: &str = "_meta.json";
 pub const STATE_DIR: &str = ".plaindb";
+pub const JOURNAL_TRUNCATED_WARNING: &str = "journal_truncated";
 
 #[derive(Debug)]
 pub(crate) struct WriterState {
@@ -415,6 +416,15 @@ impl Store {
                 collection: String::new(),
                 path,
                 details,
+            });
+        }
+        for file in journal::rejected_files(&self.root) {
+            status.warnings.push(Warning {
+                code: JOURNAL_TRUNCATED_WARNING.to_owned(),
+                db: String::new(),
+                collection: String::new(),
+                path: self.root.clone(),
+                details: serde_json::json!({ "file": file }),
             });
         }
         if let Some(missing) = git::read_missing_commits(&self.root)? {

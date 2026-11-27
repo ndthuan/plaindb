@@ -169,3 +169,90 @@ fn every_level_keeps_the_written_document() {
         assert_eq!(found["n"], json!(7));
     }
 }
+
+fn rejected_files(root: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(root.join(".plaindb"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("journal.rejected-"))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn truncation_warnings(store: &Store) -> Vec<serde_json::Value> {
+    store
+        .status()
+        .unwrap()
+        .warnings
+        .into_iter()
+        .filter(|warning| warning.code == "journal_truncated")
+        .map(|warning| warning.details)
+        .collect()
+}
+
+#[test]
+fn a_damaged_journal_record_keeps_what_follows_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with(
+        temp.path(),
+        StoreConfig {
+            durability: Durability::Off,
+            checkpoint_interval: 1_000,
+            ..StoreConfig::default()
+        },
+    );
+    store.checkpoint().unwrap();
+    for (id, n) in [("a", 1), ("b", 2), ("c", 3)] {
+        store.apply(put(id, n)).unwrap();
+    }
+    std::mem::forget(store);
+    let bytes = fs::read(journal_path(temp.path())).unwrap();
+    let lines: Vec<&[u8]> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
+    assert_eq!(lines.len(), 3);
+    let mut damaged = lines[1].to_vec();
+    damaged[0] = if damaged[0] == b'0' { b'1' } else { b'0' };
+    let mut journal = lines[0].to_vec();
+    journal.extend_from_slice(&damaged);
+    journal.extend_from_slice(lines[2]);
+    fs::write(journal_path(temp.path()), &journal).unwrap();
+
+    let reopened = Store::open(temp.path()).unwrap();
+    let (found, _) = reopened.get("main", "items", "a").unwrap().unwrap();
+    assert_eq!(found["n"], json!(1));
+    let rejected = rejected_files(temp.path());
+    assert_eq!(rejected.len(), 1);
+    let mut kept = damaged.clone();
+    kept.extend_from_slice(lines[2]);
+    assert_eq!(fs::read(&rejected[0]).unwrap(), kept);
+    let name = rejected[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        truncation_warnings(&reopened),
+        vec![json!({ "file": name })]
+    );
+}
+
+#[test]
+fn a_torn_last_journal_line_leaves_no_rejected_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_at(temp.path(), Durability::Off);
+    store.apply(put("a", 1)).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(journal_path(temp.path()))
+        .unwrap();
+    file.write_all(b"0000 {\"tx_id\": \"torn").unwrap();
+    drop(file);
+    let other = Store::open(temp.path()).unwrap();
+    assert!(rejected_files(temp.path()).is_empty());
+    assert!(truncation_warnings(&other).is_empty());
+}

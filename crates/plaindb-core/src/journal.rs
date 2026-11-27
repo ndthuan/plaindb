@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::atomic::{
     flush, parent_of, place, place_ordered, remove_temp_files, remove_tree, replace_unsynced,
-    sync_dir, unlink,
+    sync_dir, unlink, write_atomic_at,
 };
 use crate::boot::boot_id;
 use crate::config::Durability;
@@ -19,6 +19,7 @@ use crate::git::{
     retry_missing_commits,
 };
 use crate::hooks;
+use crate::names::new_id;
 use crate::scan::{GENERATION_FILE, read_generation};
 use crate::store::{STATE_DIR, WriterState};
 use crate::txlog::file_stamp;
@@ -194,10 +195,13 @@ fn decode_line(line: &[u8]) -> Option<Journal> {
     serde_json::from_slice(json).ok()
 }
 
+pub const REJECTED_PREFIX: &str = "journal.rejected-";
+
 struct Records {
     journals: Vec<Journal>,
     valid_len: u64,
     file_len: u64,
+    rejected: Option<Vec<u8>>,
 }
 
 fn read_records(root: &Path) -> Result<Records> {
@@ -208,8 +212,12 @@ fn read_records(root: &Path) -> Result<Records> {
     };
     let mut journals = Vec::new();
     let mut offset = 0;
+    let mut rejected = None;
     while let Some(end) = bytes[offset..].iter().position(|byte| *byte == b'\n') {
         let Some(journal) = decode_line(&bytes[offset..offset + end]) else {
+            if offset + end + 1 < bytes.len() {
+                rejected = Some(bytes[offset..].to_vec());
+            }
             break;
         };
         journals.push(journal);
@@ -220,6 +228,7 @@ fn read_records(root: &Path) -> Result<Records> {
         journals,
         valid_len: as_len(offset),
         file_len: as_len(bytes.len()),
+        rejected,
     })
 }
 
@@ -229,12 +238,35 @@ fn truncate(root: &Path, len: u64, durability: Durability) -> Result<()> {
     flush(&file, durability)
 }
 
-fn read_settled(root: &Path) -> Result<Vec<Journal>> {
+fn keep_rejected(root: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
+    let name = format!("{REJECTED_PREFIX}{}", new_id());
+    write_atomic_at(&root.join(STATE_DIR).join(&name), bytes, durability)?;
+    tracing::warn!("the journal held a damaged record; the rest was moved to {name}");
+    Ok(())
+}
+
+fn read_settled(root: &Path, durability: Durability) -> Result<Vec<Journal>> {
     let records = read_records(root)?;
     if records.valid_len < records.file_len {
+        if let Some(rejected) = &records.rejected {
+            keep_rejected(root, rejected, durability)?;
+        }
         truncate(root, records.valid_len, Durability::Off)?;
     }
     Ok(records.journals)
+}
+
+pub(crate) fn rejected_files(root: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root.join(STATE_DIR)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(REJECTED_PREFIX))
+        .collect();
+    names.sort();
+    names
 }
 
 fn append(root: &Path, journal: &Journal, durability: Durability) -> Result<()> {
@@ -429,7 +461,7 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
         return Ok(false);
     }
     state.journal_seen = None;
-    let journals = read_settled(root)?;
+    let journals = read_settled(root, state.durability)?;
     let generation = read_generation(root)?;
     let unfinished: Vec<&Journal> = journals
         .iter()
@@ -448,7 +480,7 @@ pub(crate) fn settle(root: &Path, state: &mut WriterState) -> Result<bool> {
 
 pub(crate) fn recover(root: &Path, state: &mut WriterState) -> Result<bool> {
     state.journal_seen = None;
-    let journals = read_settled(root)?;
+    let journals = read_settled(root, state.durability)?;
     remove_stray_temp_files(root, &journals).map_err(recovery_failed)?;
     if journals.is_empty() {
         remember(root, state, &journals)?;
