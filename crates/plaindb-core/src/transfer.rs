@@ -16,6 +16,7 @@ use crate::write::{Op, Tx};
 
 pub const IMPORT_BATCH: usize = 500;
 pub const VERSION_FIELD: &str = "_version";
+const FILES_FIELD: &str = "_files";
 
 pub fn format_of_path(path: &Path) -> Option<Format> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -73,6 +74,7 @@ pub struct Aborted {
 pub struct ImportReport {
     pub imported: u64,
     pub omitted: Vec<Omitted>,
+    pub files_dropped: Vec<String>,
     pub failed: Vec<Failure>,
     pub aborted: Option<Aborted>,
 }
@@ -84,6 +86,7 @@ struct Candidate {
     origin: Origin,
     folded: String,
     op: Op,
+    dropped_files: Option<String>,
 }
 
 struct Importer<'a> {
@@ -318,6 +321,7 @@ impl<'a> Importer<'a> {
 
     fn offer(&mut self, origin: Origin, explicit: Option<&str>, mut doc: Doc) -> Result<()> {
         doc.remove(VERSION_FIELD);
+        let had_files = doc.remove(FILES_FIELD).is_some();
         let id = match Self::resolve_id(explicit, &doc) {
             Ok(id) => id,
             Err(error) => {
@@ -334,6 +338,7 @@ impl<'a> Importer<'a> {
             self.fail(origin, &error);
             return Ok(());
         }
+        let dropped_files = had_files.then(|| id.clone());
         let (db, coll) = (self.db.to_owned(), self.coll.to_owned());
         let op = if self.options.replace {
             Op::Put {
@@ -351,7 +356,12 @@ impl<'a> Importer<'a> {
                 doc,
             }
         };
-        self.pending.push(Candidate { origin, folded, op });
+        self.pending.push(Candidate {
+            origin,
+            folded,
+            op,
+            dropped_files,
+        });
         if self.pending.len() >= IMPORT_BATCH {
             self.flush()?;
         }
@@ -372,8 +382,10 @@ impl<'a> Importer<'a> {
             let error = match self.store.apply(tx) {
                 Ok(_) => {
                     self.report.imported += u64::try_from(batch.len()).unwrap_or(u64::MAX);
-                    self.taken
-                        .extend(batch.into_iter().map(|entry| entry.folded));
+                    for entry in batch {
+                        self.taken.insert(entry.folded);
+                        self.report.files_dropped.extend(entry.dropped_files);
+                    }
                     return Ok(());
                 }
                 Err(error) => error,

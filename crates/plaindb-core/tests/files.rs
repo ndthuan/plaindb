@@ -392,7 +392,7 @@ fn the_files_field_cannot_be_written_by_document_writes() {
 }
 
 #[test]
-fn importing_a_files_field_is_refused() {
+fn importing_a_files_field_drops_it() {
     let temp = tempfile::tempdir().unwrap();
     let store = store_with_note(temp.path());
     let line = json!({ "_id": "n9", "_files": { "a.png": { "size": 1, "sha256": "00", "mime": "image/png" } } });
@@ -404,9 +404,9 @@ fn importing_a_files_field_is_refused() {
             &plaindb_core::transfer::ImportOptions::default(),
         )
         .unwrap();
-    assert_eq!(report.failed.len(), 1);
-    assert_eq!(report.failed[0].code, "invalid_document");
-    assert!(store.get("main", "notes", "n9").unwrap().is_none());
+    assert!(report.failed.is_empty());
+    assert_eq!(report.files_dropped, vec!["n9".to_owned()]);
+    assert_eq!(files_field(&store, "n9"), None);
 }
 
 #[test]

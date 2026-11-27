@@ -548,3 +548,100 @@ fn an_import_stopped_by_the_lock_prints_its_report_and_exits_one() {
         "{stderr}"
     );
 }
+
+fn attach_to_note(store: &Path, id: &str) {
+    let source = store.join("attachment.txt");
+    fs::write(&source, b"attached").expect("the source is written");
+    succeed(
+        store,
+        "file_put",
+        &[
+            "file",
+            "put",
+            "app",
+            "notes",
+            id,
+            "--name",
+            "a.txt",
+            "--from",
+            source.to_str().expect("a path"),
+        ],
+    );
+}
+
+#[test]
+fn an_import_drops_files_and_names_the_documents_that_had_them() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "collection_ack",
+        &["collection", "create", "app", "copy", "--format", "json"],
+    );
+    for id in ["a", "b", "c"] {
+        succeed(
+            dir.path(),
+            "write",
+            &["put", "app", "notes", id, "--data", r#"{"n":1}"#],
+        );
+    }
+    attach_to_note(dir.path(), "b");
+    attach_to_note(dir.path(), "a");
+    let text = raw_export(dir.path(), "notes");
+    assert!(text.contains("_files"));
+    let report = exec(
+        dir.path(),
+        Some("import"),
+        &["import", "app", "copy", "--jsonl", "-"],
+        Some(&text),
+    );
+    assert_eq!(report.code, 0, "{}", report.json);
+    assert_eq!(report.json["result"]["imported"], 3);
+    assert_eq!(report.json["result"]["files_dropped"], json!(["a", "b"]));
+    let copied = succeed(dir.path(), "get", &["get", "app", "copy", "b"]);
+    assert!(copied["doc"].get("_files").is_none());
+    assert!(!dir.path().join("app/copy/_files").exists());
+}
+
+#[test]
+fn an_import_of_documents_without_files_drops_none() {
+    let dir = store_with_collection("json");
+    let run = import_stdin(dir.path(), "{\"_id\":\"a\",\"n\":1}\n");
+    assert_eq!(run.code, 0, "{}", run.json);
+    assert_eq!(run.json["result"]["files_dropped"], json!([]));
+}
+
+#[test]
+fn an_import_directory_drops_files_too() {
+    let dir = store_with_collection("json");
+    let source = tempfile::tempdir().expect("a temp dir");
+    fs::write(
+        source.path().join("a.json"),
+        r#"{"n":1,"_files":{"x.txt":{"size":1,"sha256":"00","mime":"text/plain"}}}"#,
+    )
+    .expect("the file is written");
+    let run = plaindb(
+        dir.path(),
+        Some("import"),
+        &[
+            "import",
+            "app",
+            "notes",
+            "--dir",
+            source.path().to_str().expect("a path"),
+        ],
+    );
+    assert_eq!(run.code, 0, "{}", run.json);
+    assert_eq!(run.json["result"]["files_dropped"], json!(["a"]));
+}
+
+#[test]
+fn an_insert_with_files_is_still_refused() {
+    let dir = store_with_collection("json");
+    let run = plaindb(
+        dir.path(),
+        None,
+        &["insert", "app", "notes", "a", "--data", r#"{"_files":{}}"#],
+    );
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "invalid_document");
+}

@@ -70,7 +70,12 @@ fn report_json(report: &ImportReport) -> Value {
             value
         })
         .collect();
-    let mut value = json!({ "imported": report.imported, "omitted": omitted, "failed": failed });
+    let mut value = json!({
+        "imported": report.imported,
+        "omitted": omitted,
+        "files_dropped": report.files_dropped,
+        "failed": failed,
+    });
     if let Some(aborted) = &report.aborted {
         value["aborted"] = json!({ "code": aborted.code, "message": aborted.message });
     }
@@ -94,6 +99,9 @@ fn report_output(report: &ImportReport) -> Output {
     )];
     for entry in &report.omitted {
         lines.push(format!("omitted {}: {}", entry.file, entry.reason));
+    }
+    for id in &report.files_dropped {
+        lines.push(format!("dropped the attached files of {id}"));
     }
     for entry in &report.failed {
         let place = match &entry.origin {

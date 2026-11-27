@@ -13,6 +13,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 
 ### Changed
 
+- `plaindb import` drops the `_files` field of each document instead of failing the document with `invalid_document`, and lists the ids of those documents under `files_dropped` in its report. Attached files are not part of an export or an import.
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
 - plaindb is now licensed under MIT instead of AGPL-3.0-only.
 - Every read sees each transaction whole, also across processes: scans hold a shared lock on `.plaindb/lock`, and a store whose lock file cannot be opened is scanned until nothing moved.

@@ -16,6 +16,7 @@
         "additionalProperties": false
       }
     },
+    "files_dropped": { "type": "array", "items": { "type": "string" } },
     "failed": {
       "type": "array",
       "items": {
@@ -42,6 +43,6 @@
       "additionalProperties": false
     }
   },
-  "required": ["imported", "omitted", "failed"],
+  "required": ["imported", "omitted", "files_dropped", "failed"],
   "additionalProperties": false
 }
