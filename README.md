@@ -63,4 +63,4 @@ Bug reports are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how, and [SECUR
 
 ## Licence
 
-AGPL-3.0-only, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

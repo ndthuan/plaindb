@@ -7,6 +7,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 ### Changed
 
 - The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
+- plaindb is now licensed under MIT instead of AGPL-3.0-only.
 
 ## [0.1.0] - 2026-11-26
 
