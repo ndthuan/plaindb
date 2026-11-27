@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::yaml::{decode_text, encode_text};
-use super::{Codec, Doc};
+use super::{Codec, Doc, without_bom};
 use crate::error::{Error, Result};
 
 pub struct MdCodec;
@@ -9,7 +9,9 @@ pub struct MdCodec;
 const FENCE: &[u8] = b"---";
 
 fn is_fence_line(line: &[u8]) -> bool {
-    line == FENCE || line == b"---\r"
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    line.strip_prefix(FENCE)
+        .is_some_and(|rest| rest.iter().all(|byte| matches!(byte, b' ' | b'\t')))
 }
 
 fn split_frontmatter(bytes: &[u8]) -> Result<Option<(&[u8], &[u8])>> {
@@ -42,6 +44,7 @@ fn utf8(bytes: &[u8]) -> Result<&str> {
 
 impl Codec for MdCodec {
     fn decode(&self, bytes: &[u8]) -> Result<Doc> {
+        let bytes = without_bom(bytes);
         let (front, body) = match split_frontmatter(bytes)? {
             Some((front, body)) => (decode_text(utf8(front)?)?, body),
             None => (Doc::new(), bytes),

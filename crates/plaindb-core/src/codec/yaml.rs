@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{Codec, Doc};
+use super::{Codec, Doc, without_bom};
 use crate::error::{Error, Result};
 use crate::jsontext::sort_map;
 
@@ -10,7 +10,11 @@ pub(super) fn decode_text(text: &str) -> Result<Doc> {
     if text.trim().is_empty() {
         return Ok(Doc::new());
     }
-    match serde_saphyr::from_str::<Value>(text) {
+    let mut options = serde_saphyr::Options::default();
+    options.strict_booleans = true;
+    options.leading_zero_numbers_as_strings = true;
+    options.legacy_octal_numbers = false;
+    match serde_saphyr::from_str_with_options::<Value>(text, options) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err(Error::invalid_document(
             "not_a_mapping",
@@ -34,7 +38,7 @@ pub(super) fn encode_text(doc: &Doc) -> Result<String> {
 
 impl Codec for YamlCodec {
     fn decode(&self, bytes: &[u8]) -> Result<Doc> {
-        let text = std::str::from_utf8(bytes)
+        let text = std::str::from_utf8(without_bom(bytes))
             .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))?;
         decode_text(text)
     }

@@ -339,3 +339,17 @@ fn a_markdown_body_survives_import_and_export_byte_for_byte() {
     assert_eq!(page["title"], "Page");
     assert_eq!(bare["body"], file_body);
 }
+
+#[test]
+fn a_jsonl_import_drops_a_leading_byte_order_mark() {
+    let (_dir, store) = store_with(Format::Json);
+    let report = import_lines(
+        &store,
+        "\u{feff}{\"_id\": \"a\", \"n\": 1}\n{\"_id\": \"b\", \"n\": 2}\n",
+        false,
+    );
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(report.imported, 2);
+    let (doc, _) = store.get("app", "docs", "a").unwrap().unwrap();
+    assert_eq!(doc["n"], 1);
+}

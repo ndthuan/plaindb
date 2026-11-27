@@ -327,25 +327,6 @@ impl<'a> Planner<'a> {
     }
 
     fn encode(&mut self, db: &str, collection: &str, id: &str, doc: &Doc) -> Result<Pending> {
-        if let Some(validator) = self.validator(db, collection)? {
-            let mut checked = doc.clone();
-            for field in SYSTEM_FIELDS {
-                checked.remove(field);
-            }
-            let checked = Value::Object(checked);
-            let errors: Vec<String> = validator
-                .iter_errors(&checked)
-                .map(|error| error.to_string())
-                .collect();
-            if !errors.is_empty() {
-                return Err(Error::new(
-                    ErrorCode::SchemaViolation,
-                    format!("document {id} does not match the collection schema"),
-                )
-                .with_detail("id", id)
-                .with_detail("errors", errors));
-            }
-        }
         let format = self.collection(db, collection)?.format();
         let codec = codec_for(format);
         let bytes = codec.encode(doc)?;
@@ -363,6 +344,25 @@ impl<'a> Planner<'a> {
             }
         }
         let stored = codec.decode(&bytes)?;
+        if let Some(validator) = self.validator(db, collection)? {
+            let mut checked = stored.clone();
+            for field in SYSTEM_FIELDS {
+                checked.remove(field);
+            }
+            let checked = Value::Object(checked);
+            let errors: Vec<String> = validator
+                .iter_errors(&checked)
+                .map(|error| error.to_string())
+                .collect();
+            if !errors.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::SchemaViolation,
+                    format!("document {id} does not match the collection schema"),
+                )
+                .with_detail("id", id)
+                .with_detail("errors", errors));
+            }
+        }
         Ok(Pending {
             version: version_of(&bytes),
             doc: Arc::new(stored),

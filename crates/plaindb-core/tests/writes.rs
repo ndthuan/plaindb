@@ -771,3 +771,74 @@ fn a_second_store_in_the_same_process_sees_the_writes() {
         json!(2)
     );
 }
+
+fn collection_store(root: &Path, name: &str, format: Format) -> Store {
+    let store = store_with_users(root);
+    store.create_collection("main", name, format).unwrap();
+    store
+}
+
+#[test]
+fn hand_written_yaml_is_written_back_quoted() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = collection_store(temp.path(), "places", Format::Yaml);
+    let path = temp.path().join("main/places/home.yaml");
+    fs::write(&path, "country: NO\nok: yes\nzip: 010\nn: 10\n").unwrap();
+    store.rescan().unwrap();
+    let expected = json!({"country": "NO", "ok": "yes", "zip": "010", "n": 10});
+    let fields = |store: &Store| {
+        let (mut found, _) = store.get("main", "places", "home").unwrap().unwrap();
+        for field in ["_id", "_created_at", "_updated_at", "seen"] {
+            found.remove(field);
+        }
+        Value::Object(found)
+    };
+    assert_eq!(fields(&store), expected);
+    one(&store, patch("places", "home", json!({"seen": 1}), None)).unwrap();
+    assert_eq!(fields(&store), expected);
+    drop(store);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("country: NO\n"), "{text}");
+    assert!(!text.contains("zip: 010\n"), "{text}");
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(fields(&store), expected);
+}
+
+fn notes_with_schema(root: &Path, schema: Value) -> Store {
+    let store = collection_store(root, "notes", Format::Md);
+    store.set_schema("main", "notes", Some(schema)).unwrap();
+    store
+}
+
+#[test]
+fn a_markdown_write_is_checked_with_its_body() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = notes_with_schema(
+        temp.path(),
+        json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "additionalProperties": false
+        }),
+    );
+    let error = expect_err(one(&store, insert("notes", "n1", json!({"title": "X"}))));
+    assert_eq!(error.code, ErrorCode::SchemaViolation);
+    assert!(!temp.path().join("main/notes/n1.md").exists());
+}
+
+#[test]
+fn a_markdown_write_with_a_declared_body_stays_valid() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = notes_with_schema(
+        temp.path(),
+        json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+            "additionalProperties": false
+        }),
+    );
+    one(&store, insert("notes", "n1", json!({"title": "X"}))).unwrap();
+    store.rescan().unwrap();
+    assert!(store.get("main", "notes", "n1").unwrap().is_some());
+    assert!(store.status().unwrap().invalid.is_empty());
+}

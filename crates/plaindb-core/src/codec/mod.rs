@@ -18,6 +18,10 @@ pub trait Codec {
     fn encode(&self, doc: &Doc) -> Result<Vec<u8>>;
 }
 
+pub(crate) fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+}
+
 pub fn codec_for(format: Format) -> &'static dyn Codec {
     match format {
         Format::Json => &JsonCodec,

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{Codec, Doc};
+use super::{Codec, Doc, without_bom};
 use crate::error::{Error, Result};
 use crate::jsontext::pretty_bytes;
 
@@ -8,7 +8,7 @@ pub struct JsonCodec;
 
 impl Codec for JsonCodec {
     fn decode(&self, bytes: &[u8]) -> Result<Doc> {
-        match serde_json::from_slice::<Value>(bytes) {
+        match serde_json::from_slice::<Value>(without_bom(bytes)) {
             Ok(Value::Object(map)) => Ok(map),
             Ok(_) => Err(Error::invalid_document(
                 "not_an_object",

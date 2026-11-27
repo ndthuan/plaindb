@@ -186,3 +186,97 @@ proptest! {
         prop_assert_eq!(codec(Format::Md).encode(&decoded).unwrap(), encoded);
     }
 }
+
+#[test]
+fn yaml_reads_only_core_booleans() {
+    let decoded = codec(Format::Yaml)
+        .decode(b"country: NO\nok: yes\nsw: Off\nt: true\nf: False\ny: Y\nn: n\non: ON\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(decoded),
+        json!({
+            "country": "NO",
+            "ok": "yes",
+            "sw": "Off",
+            "t": true,
+            "f": false,
+            "y": "Y",
+            "n": "n",
+            "on": "ON",
+        })
+    );
+}
+
+#[test]
+fn yaml_keeps_leading_zeros_as_text() {
+    let decoded = codec(Format::Yaml)
+        .decode(b"zip: 010\nn: 10\nz: 0\nh: 0.5\ne: 1e3\nneg: -3\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(decoded),
+        json!({"zip": "010", "n": 10, "z": 0, "h": 0.5, "e": 1000.0, "neg": -3})
+    );
+}
+
+#[test]
+fn markdown_front_matter_reads_the_same_way() {
+    let decoded = codec(Format::Md)
+        .decode(b"---\ncountry: NO\nzip: 010\n---\ntext\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(decoded),
+        json!({"country": "NO", "zip": "010", "body": "text\n"})
+    );
+}
+
+#[test]
+fn a_byte_order_mark_is_dropped_in_every_format() {
+    for (format, text) in [
+        (Format::Json, &b"{\"title\": \"X\"}\n"[..]),
+        (Format::Yaml, &b"title: X\n"[..]),
+        (Format::Md, &b"---\ntitle: X\n---\ntext\n"[..]),
+    ] {
+        let mut marked = b"\xef\xbb\xbf".to_vec();
+        marked.extend_from_slice(text);
+        let plain = codec(format).decode(text).unwrap();
+        assert_eq!(codec(format).decode(&marked).unwrap(), plain, "{format:?}");
+        assert!(
+            !codec(format)
+                .encode(&plain)
+                .unwrap()
+                .starts_with(b"\xef\xbb\xbf")
+        );
+    }
+    let marked = codec(Format::Md)
+        .decode(b"\xef\xbb\xbf---\ntitle: X\n---\ntext\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(marked),
+        json!({"title": "X", "body": "text\n"})
+    );
+}
+
+#[test]
+fn markdown_fences_may_end_in_spaces_and_tabs() {
+    let decoded = codec(Format::Md)
+        .decode(b"--- \ntitle: X\n---\t\ntext\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(decoded),
+        json!({"title": "X", "body": "text\n"})
+    );
+    let decoded = codec(Format::Md)
+        .decode(b"---  \t\ntitle: X\n--- \r\ntext\n")
+        .unwrap();
+    assert_eq!(
+        Value::Object(decoded),
+        json!({"title": "X", "body": "text\n"})
+    );
+}
+
+#[test]
+fn markdown_with_a_blank_line_before_the_fence_is_all_body() {
+    let text = "\n---\ntitle: X\n---\ntext\n";
+    let decoded = codec(Format::Md).decode(text.as_bytes()).unwrap();
+    assert_eq!(Value::Object(decoded), json!({"body": text}));
+}

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::codec::{Doc, codec_for};
+use crate::codec::{Doc, codec_for, without_bom};
 use crate::config::Format;
 use crate::error::{Error, ErrorCode, Result};
 use crate::names::{new_id, validate_id};
@@ -287,7 +287,12 @@ impl Store {
             let number = u64::try_from(index + 1).unwrap_or(u64::MAX);
             let origin = Origin::Line(number);
             let bytes = line?;
-            let decoded = std::str::from_utf8(&bytes)
+            let line = if index == 0 {
+                without_bom(&bytes)
+            } else {
+                &bytes
+            };
+            let decoded = std::str::from_utf8(line)
                 .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))
                 .and_then(|text| {
                     if text.trim().is_empty() {
