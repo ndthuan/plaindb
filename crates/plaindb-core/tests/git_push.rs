@@ -293,3 +293,123 @@ fn concurrent_writers_leave_the_remote_at_the_local_head() {
         git(&root, &["rev-parse", "HEAD"])
     );
 }
+
+fn set_store_key(root: &Path, key: &str, value: &str) {
+    let path = root.join("_store.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config[key] = json!(value);
+    fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}
+
+#[test]
+fn a_remote_that_is_a_git_option_never_reaches_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let root = dir.path().join("store");
+    let store = pushing_store(&root, &remote);
+    pushed(&store, "a", 1);
+    let injected = dir.path().join("INJ");
+    set_store_key(
+        &root,
+        "remote",
+        &format!(
+            "--receive-pack=touch {};git-receive-pack",
+            injected.display()
+        ),
+    );
+    assert_eq!(store.push().unwrap_err().code, ErrorCode::InvalidConfig);
+    assert_eq!(
+        store
+            .apply(put("b", 2))
+            .map(|result| result.push)
+            .ok()
+            .flatten(),
+        None
+    );
+    let error = Store::open(&root).err().unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.details["key"], "remote");
+    let report =
+        plaindb_core::doctor::inspect(&root, plaindb_core::doctor::DoctorOptions::default());
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.id == "store_config")
+        .unwrap();
+    assert_eq!(check.status, plaindb_core::doctor::CheckStatus::Error);
+    assert!(check.fix.as_deref().unwrap().contains("_store.json"));
+    assert!(!report.checks.iter().any(|check| check.id == "git_binary"));
+    assert!(!injected.exists());
+}
+
+#[test]
+fn a_remote_url_that_looks_like_an_option_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init_with_git(dir.path().join("store")).unwrap();
+    for url in ["--upload-pack=x", "-x", "a b", "a\u{7}b"] {
+        let error = store.set_remote(url).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{url:?}");
+        assert_eq!(error.details["key"], "remote_url", "{url:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_push_names_the_remote_after_a_separator_and_sends_a_full_refspec() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = bare_remote(dir.path(), "remote.git");
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let calls = dir.path().join("calls");
+    let recorder = dir.path().join("recording-git");
+    fs::write(
+        &recorder,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nexec {real} \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+    let root = dir.path().join("store");
+    let store = Store::init_with(
+        &root,
+        StoreConfig {
+            git: true,
+            durability: Durability::Off,
+            git_binary: Some(recorder.to_str().unwrap().to_owned()),
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "items", Format::Json)
+        .unwrap();
+    store.set_remote(remote.to_str().unwrap()).unwrap();
+    store.set_push(PushMode::OnCommit).unwrap();
+    assert_eq!(pushed(&store, "a", 1).push, Some(PushOutcome::Ok));
+    let head = store.status().unwrap().git.head.unwrap();
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), head);
+    let recorded = fs::read_to_string(&calls).unwrap();
+    let pushes: Vec<&str> = recorded
+        .lines()
+        .filter(|line| line.split(' ').any(|word| word == "push"))
+        .collect();
+    assert!(!pushes.is_empty(), "{recorded}");
+    for line in pushes {
+        assert!(
+            line.ends_with("push --porcelain -- origin refs/heads/main:refs/heads/main"),
+            "{line}"
+        );
+    }
+}

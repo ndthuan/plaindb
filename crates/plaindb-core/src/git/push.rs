@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::command::{rejected_as_behind, run_git};
 use super::{git_disabled, git_error, head_id, open, read_optional, state_file};
 use crate::atomic::{ensure_dir, replace_unsynced};
-use crate::config::Durability;
+use crate::config::{Durability, validate_remote_url};
 use crate::config::{PushMode, StoreConfig, to_file_bytes};
 use crate::error::{Error, ErrorCode, Result};
 use crate::store::{STATE_DIR, Store, read_config};
@@ -78,10 +78,11 @@ enum Attempt {
 }
 
 fn attempt(root: &Path, config: &StoreConfig) -> Attempt {
+    let refspec = format!("refs/heads/{0}:refs/heads/{0}", config.branch);
     match run_git(
         root,
         config,
-        &["push", "--porcelain", &config.remote, &config.branch],
+        &["push", "--porcelain", "--", &config.remote, &refspec],
         PUSH_TIMEOUT,
     ) {
         Ok(run) if run.success => Attempt::Pushed,
@@ -271,6 +272,7 @@ impl Store {
     }
 
     pub fn set_remote(&self, url: &str) -> Result<()> {
+        validate_remote_url(url)?;
         let config = read_config(&self.root)?;
         if !config.git {
             return Err(git_disabled());

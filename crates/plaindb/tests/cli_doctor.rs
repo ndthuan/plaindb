@@ -421,3 +421,30 @@ fn a_store_without_durability_is_warned_and_the_level_is_always_named() {
         assert!(off.check(id)["details"].is_object(), "{id}");
     }
 }
+
+#[test]
+fn a_remote_that_is_a_git_option_is_a_store_config_error_not_a_crash() {
+    let fixture = fixture("on-commit");
+    let injected = fixture._dir.path().join("INJ");
+    let path = fixture.store.join("_store.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    config["remote"] = Value::String(format!(
+        "--receive-pack=touch {};git-receive-pack",
+        injected.display()
+    ));
+    fs::write(&path, serde_json::to_vec_pretty(&config).expect("json")).expect("write");
+    let report = doctor(&fixture.store, &[]);
+    assert_eq!(report.code, Some(1));
+    assert_eq!(report.status("store_config"), "error");
+    assert_eq!(report.check("store_config")["group"], "store");
+    assert!(
+        report.check("store_config")["fix"]
+            .as_str()
+            .expect("a fix")
+            .starts_with("edit _store.json: remote takes")
+    );
+    let push = plaindb(&fixture.store, &["--json", "push"]);
+    assert_ne!(push.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&push.stdout).contains("invalid_config"));
+    assert!(!injected.exists());
+}

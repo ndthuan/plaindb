@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::StoreConfig;
+use crate::error::ErrorCode;
 use crate::git;
 use crate::store::{Store, read_config};
 
@@ -125,6 +126,11 @@ pub fn inspect(root: &Path, options: DoctorOptions) -> Report {
     let mut checks = Vec::new();
     match read_config(root) {
         Ok(config) => collect(root, &config, options, &mut checks),
+        Err(error) if error.code == ErrorCode::InvalidConfig => checks.push(
+            Check::error(Group::Store, "store_config", error.message.clone())
+                .with_fix(format!("edit _store.json: {}", error.message))
+                .with_details(error.details),
+        ),
         Err(error) => checks.push(
             Check::error(Group::Store, "store_format", error.message)
                 .with_details(error.details)

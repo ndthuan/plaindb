@@ -12,6 +12,7 @@ use crate::cache;
 use crate::codec::Doc;
 use crate::config::{
     CollectionMeta, Durability, Format, STORE_FORMAT, StoreConfig, from_file_bytes, to_file_bytes,
+    validate_branch_name, validate_remote_name,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::git;
@@ -121,6 +122,8 @@ pub(crate) fn read_config(root: &Path) -> Result<StoreConfig> {
         .with_detail("found", config.format)
         .with_detail("supported", STORE_FORMAT));
     }
+    validate_remote_name(&config.remote)?;
+    validate_branch_name(&config.branch)?;
     Ok(config)
 }
 

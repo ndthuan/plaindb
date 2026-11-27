@@ -88,15 +88,61 @@ fn invalid_value(key: &str, expected: &str) -> Error {
     Error::new(ErrorCode::InvalidConfig, format!("{key} takes {expected}")).with_detail("key", key)
 }
 
-fn parse_name(key: &str, value: &str) -> Result<String> {
-    let valid =
-        !value.is_empty() && !value.starts_with('-') && !value.contains(char::is_whitespace);
-    if valid {
-        Ok(value.to_owned())
+const REMOTE_EXPECTED: &str = "a remote name of letters, digits, . _ -";
+const BRANCH_EXPECTED: &str = "a branch name without spaces, .., @{ or a leading - + :";
+const MAX_REMOTE_CHARS: usize = 64;
+const MAX_BRANCH_CHARS: usize = 200;
+
+fn invalid_name_value(key: &str, expected: &str, value: &str) -> Error {
+    invalid_value(key, expected).with_detail("value", value)
+}
+
+fn is_plain_name(value: &str, max: usize, extra: fn(char) -> bool) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && value.chars().count() <= max
+        && chars.all(|c| c.is_ascii_alphanumeric() || extra(c))
+}
+
+pub fn validate_remote_name(value: &str) -> Result<()> {
+    if is_plain_name(value, MAX_REMOTE_CHARS, |c| matches!(c, '.' | '_' | '-')) {
+        Ok(())
     } else {
-        Err(invalid_value(
-            key,
-            "a name without spaces that does not start with -",
+        Err(invalid_name_value("remote", REMOTE_EXPECTED, value))
+    }
+}
+
+pub fn validate_branch_name(value: &str) -> Result<()> {
+    let valid = is_plain_name(value, MAX_BRANCH_CHARS, |c| {
+        matches!(c, '.' | '_' | '/' | '-')
+    }) && !value.contains("..")
+        && !value.contains("//")
+        && !value.contains("@{")
+        && !value.ends_with('/')
+        && !value.ends_with('.')
+        && !value
+            .split('/')
+            .any(|component| component.ends_with(".lock"));
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_name_value("branch", BRANCH_EXPECTED, value))
+    }
+}
+
+pub(crate) fn validate_remote_url(url: &str) -> Result<()> {
+    let valid = !url.is_empty()
+        && !url.starts_with('-')
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_name_value(
+            "remote_url",
+            "a URL that does not start with - and has no spaces or control characters",
+            url,
         ))
     }
 }
@@ -154,8 +200,14 @@ impl StoreConfig {
                     ],
                 )?;
             }
-            "remote" => self.remote = parse_name(key, value)?,
-            "branch" => self.branch = parse_name(key, value)?,
+            "remote" => {
+                validate_remote_name(value)?;
+                value.clone_into(&mut self.remote);
+            }
+            "branch" => {
+                validate_branch_name(value)?;
+                value.clone_into(&mut self.branch);
+            }
             "lock_timeout_ms" => self.lock_timeout_ms = parse_count(key, value)?,
             "gc_every" => self.gc_every = parse_count(key, value)?,
             "git_binary" => {

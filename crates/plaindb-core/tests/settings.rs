@@ -109,3 +109,76 @@ fn a_setting_is_committed_when_git_is_on() {
     store.set_setting("git_binary", "").unwrap();
     assert_eq!(subject(temp.path()), "meta store: set gc_every");
 }
+
+const BAD_REMOTES: &[&str] = &["--receive-pack=x", "-x", "a b", "a;b", ""];
+const BAD_BRANCHES: &[&str] = &[
+    "+main", ":main", "-x", "a..b", "a//b", "x.lock", "a@{1}", "main/", "main.",
+];
+
+fn long_remote() -> String {
+    "r".repeat(65)
+}
+
+fn write_store_key(root: &std::path::Path, key: &str, value: &str) {
+    let path = root.join("_store.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config[key] = json!(value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}
+
+fn refused(key: &str, values: &[String]) {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    for value in values {
+        let error = store.set_setting(key, value).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{key} {value:?}");
+        assert_eq!(error.details["key"], key, "{value:?}");
+        assert_eq!(error.details["value"], value.as_str(), "{value:?}");
+    }
+    assert_eq!(*store.config(), StoreConfig::default());
+    drop(store);
+    for value in values {
+        write_store_key(temp.path(), key, value);
+        let error = Store::open(temp.path()).err().unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{key} {value:?}");
+        assert_eq!(error.details["key"], key, "{value:?}");
+        assert_eq!(error.details["value"], value.as_str(), "{value:?}");
+    }
+}
+
+#[test]
+fn a_remote_that_is_not_a_plain_name_is_refused_when_set_and_when_read() {
+    let mut values: Vec<String> = BAD_REMOTES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
+    values.push(long_remote());
+    refused("remote", &values);
+}
+
+#[test]
+fn a_branch_that_is_not_a_plain_branch_name_is_refused_when_set_and_when_read() {
+    let values: Vec<String> = BAD_BRANCHES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
+    refused("branch", &values);
+}
+
+#[test]
+fn plain_remote_and_branch_names_are_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path()).unwrap();
+    store.set_setting("remote", "backup-2.mirror_a").unwrap();
+    store.set_setting("remote", &"r".repeat(64)).unwrap();
+    for branch in ["main", "backup/2026", "v1.x"] {
+        store.set_setting("branch", branch).unwrap();
+        assert_eq!(store.config().branch, branch);
+    }
+    drop(store);
+    write_store_key(temp.path(), "branch", "backup/2026");
+    assert_eq!(
+        Store::open(temp.path()).unwrap().config().branch,
+        "backup/2026"
+    );
+}
