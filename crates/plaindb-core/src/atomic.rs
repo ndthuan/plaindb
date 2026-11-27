@@ -60,6 +60,9 @@ mod platform {
 }
 
 pub(crate) fn flush(file: &File, durability: Durability) -> Result<()> {
+    if hooks::skip_flush() {
+        return Ok(());
+    }
     match durability {
         Durability::Off => {}
         Durability::Full => {
@@ -72,7 +75,7 @@ pub(crate) fn flush(file: &File, durability: Durability) -> Result<()> {
 }
 
 fn order(file: &File, durability: Durability) -> Result<()> {
-    if durability != Durability::Off {
+    if durability != Durability::Off && !hooks::skip_flush() {
         platform::barrier(file)?;
     }
     Ok(())

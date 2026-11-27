@@ -36,6 +36,17 @@ fn run_inserts(store: &Store, count: u64) -> Result<()> {
     Ok(())
 }
 
+fn run_insert_loop(store: &Store, count: u64) -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    for n in 0..count {
+        let id = format!("p{n}");
+        store.apply(Tx::new(vec![insert(Some(&id), json!({ "n": n }))]))?;
+        writeln!(out, "{id}")?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
 fn run_patches(store: &Store, count: u64) -> Result<()> {
     let writer = std::process::id();
     for n in 0..count {
@@ -292,13 +303,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: plaindb-test-writer <store> <insert|patch|tx|put-all|crash|attach|attach-crash|open|soak|push|gc> [count] [log]"
+            "usage: plaindb-test-writer <store> <insert|insert-loop|patch|tx|put-all|crash|attach|attach-crash|open|soak|push|gc> [count] [log]"
         );
         return ExitCode::from(2);
     }
     let count: u64 = args.get(3).and_then(|text| text.parse().ok()).unwrap_or(1);
     let outcome = Store::open(&args[1]).and_then(|store| match args[2].as_str() {
         "insert" => run_inserts(&store, count),
+        "insert-loop" => run_insert_loop(&store, count),
         "patch" => run_patches(&store, count),
         "tx" => run_transactions(&store, count),
         "put-all" => run_put_all(&store, count),

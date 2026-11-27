@@ -9,6 +9,7 @@ Each line below is backed by tests named in [`crates/plaindb-core/tests/guarante
 - Each read sees every transaction whole or not at all, also across processes. A read holds a shared lock on `.plaindb/lock` while it scans, waits at most `lock_timeout_ms` for a running write, and on a store whose lock file cannot be opened checks that nothing moved while it scanned. <!-- g:isolation -->
 - A hand edit made while no write is in progress is never overwritten. A write that would replace a file changed since plaindb read it fails with `version_conflict` and the reason `changed_on_disk`, and the file stays as it is. After plaindb restarts on the same boot, a hand edit or a hand delete made since a committed transaction is kept as well. After the machine restarts, a committed write at `full` survives a power loss: within the checkpoint window (the transactions a process that did not close cleanly wrote since its last checkpoint), a file that is missing, or that holds exactly the bytes it had before one of those transactions, is written again from the journal, and a file edited by hand to other content is kept. The one exception is a transaction that was cut short: finishing it writes its own files again. <!-- g:hand-edit -->
 - A file plaindb wrote reads back unchanged: a document in each format decodes to the value that was encoded, a Markdown body survives byte for byte, an attached file reads back byte for byte, and a clone of the remote opens as the same store with the same versions and the same attached files. <!-- g:round-trip -->
+- A committed write at `full` survives a power loss on Linux. A test runs a store on LazyFS, a filesystem layer that drops every write not yet flushed on command: in each of 20 rounds a writer making 200 inserts is killed at a random point and the unflushed data is dropped, and every insert reported as committed is then present, the store opens with no invalid file and no warning, and the next write succeeds. On macOS power loss is tested at the process-crash level only. <!-- g:power-loss -->
 - With git on, a document can be read as of any commit or time with `get --at`, and `history` lists the commits that changed it. <!-- g:time-travel -->
 - plaindb never force pushes. A push the remote refuses because it holds commits the store lacks, or because its history is unrelated, changes nothing on the remote. <!-- g:no-force-push -->
 
@@ -17,5 +18,7 @@ A write is durable once it returns. When a step after the commit point fails (wr
 A transaction id given with `--tx-id` is remembered for the last 1,000 transactions; repeating an older one writes again.
 
 A read command changes nothing in the store but the index cache under `.plaindb`, and needs no write access to the directory.
+
+These guarantees were tested on APFS (macOS) and ext4 (Linux). Other filesystems, network mounts and exFAT included, are untested.
 
 What plaindb does not promise: durability beyond the level chosen in [Durability](durability.md), and anything about files changed while a write is running.

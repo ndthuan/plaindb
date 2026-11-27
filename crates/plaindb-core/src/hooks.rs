@@ -60,6 +60,10 @@ mod enabled {
         std::env::var(name).ok().filter(|value| !value.is_empty())
     }
 
+    pub(crate) fn skip_flush() -> bool {
+        var("PLAINDB_TEST_SKIP_FLUSH").as_deref() == Some("1")
+    }
+
     pub(crate) fn before_journal() {
         if var("PLAINDB_TEST_CRASH_BEFORE_JOURNAL").as_deref() == Some("1") {
             crash();
@@ -125,6 +129,10 @@ mod enabled {
     #[cfg(not(target_vendor = "apple"))]
     pub(crate) fn dir_fsync() {}
 
+    pub(crate) fn skip_flush() -> bool {
+        false
+    }
+
     pub(crate) fn before_journal() {}
 
     pub(crate) fn after_journal() {}
@@ -146,7 +154,7 @@ mod enabled {
 pub(crate) use enabled::dir_fsync;
 pub(crate) use enabled::{
     after_files, after_git_commit, after_journal, before_git_commit, before_journal, boot_id,
-    during_checkpoint, full_flush, git_program,
+    during_checkpoint, full_flush, git_program, skip_flush,
 };
 #[cfg(feature = "test-hooks")]
 pub use enabled::{dir_fsync_count, full_flush_count, set_git_program};

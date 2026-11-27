@@ -68,6 +68,10 @@ const TABLE: &[Row] = &[
         ],
     },
     Row {
+        anchor: "power-loss",
+        tests: &["powerloss::committed_inserts_survive_a_power_loss"],
+    },
+    Row {
         anchor: "time-travel",
         tests: &["git_history::a_document_is_read_at_each_commit_and_time"],
     },
