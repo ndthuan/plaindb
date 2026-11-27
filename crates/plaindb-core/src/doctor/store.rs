@@ -34,6 +34,7 @@ pub(super) fn checks(root: &Path, config: &StoreConfig) -> Vec<Check> {
             checks.extend(document_checks(&snapshot));
             checks.push(skipped_files_check(&snapshot));
             checks.push(unique_duplicates_check(&snapshot));
+            checks.extend(super::attachments::checks(root, &snapshot));
             checks.push(cache_check(root, &snapshot));
         }
         Err(error) => checks.push(

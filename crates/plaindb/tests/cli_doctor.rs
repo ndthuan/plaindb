@@ -676,3 +676,51 @@ fn a_failing_check_makes_the_json_line_a_failure_with_the_report() {
     let parsed: Value = serde_json::from_slice(&healthy.stdout).expect("stdout is JSON");
     assert_eq!(parsed["ok"], true);
 }
+
+#[test]
+fn a_file_changed_by_hand_is_a_doctor_warning_with_a_fix() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = dir.path().join("store");
+    succeed(&store, &["init"]);
+    succeed(&store, &["db", "create", "app"]);
+    succeed(
+        &store,
+        &["collection", "create", "app", "notes", "--format", "md"],
+    );
+    succeed(
+        &store,
+        &["insert", "app", "notes", "a", "--data", r#"{"body":"x"}"#],
+    );
+    let source = dir.path().join("photo.png");
+    fs::write(&source, b"png bytes").expect("the source is written");
+    succeed(
+        &store,
+        &[
+            "file",
+            "put",
+            "app",
+            "notes",
+            "a",
+            "--name",
+            "photo.png",
+            "--from",
+            source.to_str().expect("a path"),
+        ],
+    );
+    let clean = doctor(&store, &["--offline"]);
+    assert_eq!(clean.status("attachment_mismatch"), "ok");
+    fs::write(store.join("app/notes/_files/a/photo.png"), b"edited").expect("the edit");
+    let report = doctor(&store, &["--offline"]);
+    assert_eq!(report.code, Some(0));
+    assert_eq!(report.status("attachment_mismatch"), "warn");
+    assert_eq!(
+        report.check("attachment_mismatch")["details"]["first"][0],
+        "app/notes/a/photo.png"
+    );
+    assert!(
+        report.check("attachment_mismatch")["fix"]
+            .as_str()
+            .expect("a fix")
+            .contains("plaindb file")
+    );
+}

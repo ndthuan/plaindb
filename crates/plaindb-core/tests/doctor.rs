@@ -25,6 +25,9 @@ fn a_healthy_store_reports_stable_check_ids_and_no_error() {
         "names_case",
         "store_skipped_files",
         "store_unique_duplicates",
+        "attachment_missing",
+        "attachment_mismatch",
+        "attachment_orphan",
         "index_cache",
         "filesystem_network",
         "filesystem_case",
@@ -353,4 +356,116 @@ fn an_unreadable_file_is_an_invalid_document_in_doctor() {
         .unwrap();
     assert_eq!(check.status, CheckStatus::Error);
     assert_eq!(check.details["first"], json!(["main/users/u1"]));
+}
+
+fn attach(id: &str, name: &str, bytes: &[u8]) -> Op {
+    Op::AttachFile {
+        db: "main".to_owned(),
+        coll: "items".to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        bytes: bytes.to_vec(),
+        mime: None,
+        if_version: None,
+    }
+}
+
+fn store_with_attachments(root: &Path) -> Store {
+    let store = Store::init_with(
+        root,
+        StoreConfig {
+            durability: Durability::Off,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    store.create_db("main").unwrap();
+    store
+        .create_collection("main", "items", Format::Json)
+        .unwrap();
+    store
+        .apply(Tx::new(vec![
+            Op::Insert {
+                db: "main".to_owned(),
+                coll: "items".to_owned(),
+                id: Some("a".to_owned()),
+                doc: doc(json!({})),
+            },
+            attach("a", "one.png", b"one"),
+            attach("a", "two.pdf", b"two"),
+        ]))
+        .unwrap();
+    store
+}
+
+#[test]
+fn a_store_whose_files_match_their_documents_has_no_attachment_problem() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_attachments(temp.path());
+    for id in [
+        "attachment_missing",
+        "attachment_mismatch",
+        "attachment_orphan",
+    ] {
+        let check = find(&store, id);
+        assert_eq!(check.status, CheckStatus::Ok, "{id}: {}", check.message);
+        assert_eq!(check.details["count"], json!(0), "{id}");
+    }
+}
+
+#[test]
+fn missing_changed_and_orphan_files_are_warnings_with_a_fix() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_attachments(temp.path());
+    let files = temp.path().join("main/items/_files");
+    fs::remove_file(files.join("a/one.png")).unwrap();
+    fs::write(files.join("a/two.pdf"), b"changed by hand").unwrap();
+    fs::write(files.join("a/extra.txt"), b"placed by hand").unwrap();
+    fs::create_dir_all(files.join("gone")).unwrap();
+    fs::write(files.join("gone/left.bin"), b"left behind").unwrap();
+    let before = fs::read(files.join("a/two.pdf")).unwrap();
+
+    let missing = find(&store, "attachment_missing");
+    assert_eq!(missing.status, CheckStatus::Warn);
+    assert_eq!(missing.details["first"], json!(["main/items/a/one.png"]));
+    assert!(missing.fix.as_deref().unwrap().contains("plaindb file rm"));
+
+    let mismatch = find(&store, "attachment_mismatch");
+    assert_eq!(mismatch.status, CheckStatus::Warn);
+    assert_eq!(mismatch.details["first"], json!(["main/items/a/two.pdf"]));
+    assert!(
+        mismatch
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("plaindb file put")
+    );
+
+    let orphan = find(&store, "attachment_orphan");
+    assert_eq!(orphan.status, CheckStatus::Warn);
+    assert_eq!(orphan.details["count"], json!(2));
+    assert_eq!(
+        orphan.details["first"],
+        json!(["main/items/a/extra.txt", "main/items/gone/left.bin"])
+    );
+    assert!(orphan.fix.is_some());
+
+    let report = store.doctor(DoctorOptions { offline: true });
+    assert_eq!(report.errors(), 0);
+    assert_eq!(fs::read(files.join("a/two.pdf")).unwrap(), before);
+    assert!(files.join("gone/left.bin").exists());
+    assert!(!files.join("a/one.png").exists());
+}
+
+#[test]
+fn only_the_first_ten_problem_files_are_listed() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_with_attachments(temp.path());
+    let dir = temp.path().join("main/items/_files/a");
+    for n in 0..12 {
+        fs::write(dir.join(format!("stray{n:02}.bin")), b"x").unwrap();
+    }
+    let orphan = find(&store, "attachment_orphan");
+    assert_eq!(orphan.details["count"], json!(12));
+    assert_eq!(orphan.details["first"].as_array().unwrap().len(), 10);
 }
