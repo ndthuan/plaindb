@@ -38,7 +38,10 @@
                 "git_not_found",
                 "remote_ahead",
                 "head_off_branch",
-                "io"
+                "io",
+                "usage",
+                "doctor_failed",
+                "import_failed"
               ]
             },
             "message": { "type": "string" },

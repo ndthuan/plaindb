@@ -49,12 +49,6 @@ fn exec(store: &Path, kind: Option<&str>, args: &[&str], stdin: Option<&str>) ->
     drop(input);
     let output = child.wait_with_output().expect("the binary finishes");
     let stdout = String::from_utf8(output.stdout).expect("stdout is text");
-    if output.status.code() == Some(2) {
-        return Run {
-            code: 2,
-            json: Value::Null,
-        };
-    }
     assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
     let parsed: Value = serde_json::from_str(&stdout).expect("stdout is JSON");
     assert_valid(&validator("response.schema.json"), &parsed);
@@ -206,6 +200,7 @@ fn an_import_needs_a_source() {
     let dir = store_with_collection("json");
     let run = exec(dir.path(), None, &["import", "app", "notes"], None);
     assert_eq!(run.code, 2);
+    assert_eq!(run.json["error"]["code"], "usage");
 }
 
 #[test]

@@ -43,14 +43,11 @@ fn plaindb(store: &Path, kind: Option<&str>, args: &[&str]) -> Run {
         .expect("the binary runs");
     let stdout = String::from_utf8(output.stdout).expect("stdout is text");
     let stderr = String::from_utf8(output.stderr).expect("stderr is text");
-    let mut parsed = Value::Null;
-    if output.status.code() != Some(2) {
-        assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
-        parsed = serde_json::from_str(&stdout).expect("stdout is JSON");
-        assert_valid(&validator("response.schema.json"), &parsed);
-        if let (Some(kind), Some(result)) = (kind, parsed.get("result")) {
-            assert_valid(&validator(&format!("results/{kind}.schema.json")), result);
-        }
+    assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_valid(&validator("response.schema.json"), &parsed);
+    if let (Some(kind), Some(result)) = (kind, parsed.get("result")) {
+        assert_valid(&validator(&format!("results/{kind}.schema.json")), result);
     }
     Run {
         code: output.status.code().expect("the binary exits"),
@@ -359,8 +356,130 @@ fn the_store_comes_from_the_environment_and_usage_errors_exit_two() {
     assert_eq!(output.status.code(), Some(0));
     let usage = plaindb(dir.path(), None, &["get", "app"]);
     assert_eq!(usage.code, 2);
+    assert_eq!(usage.json["error"]["code"], "usage");
+    assert!(!usage.stderr.is_empty());
+}
+
+fn raw(args: &[&str]) -> Run {
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    Run {
+        code: output.status.code().expect("the binary exits"),
+        stdout: String::from_utf8(output.stdout).expect("stdout is text"),
+        stderr: String::from_utf8(output.stderr).expect("stderr is text"),
+        json: Value::Null,
+    }
+}
+
+#[test]
+fn a_usage_error_under_json_prints_one_usage_line() {
+    let dir = fixture(false);
+    for args in [&["nosuch"][..], &["get", "app"][..]] {
+        let usage = plaindb(dir.path(), None, args);
+        assert_eq!(usage.code, 2, "{args:?}");
+        let error = &usage.json["error"];
+        assert_eq!(usage.json["ok"], false, "{args:?}");
+        assert_eq!(error["code"], "usage", "{args:?}");
+        assert_eq!(error["details"], json!({}), "{args:?}");
+        let message = error["message"].as_str().expect("a message");
+        assert!(
+            !message.is_empty() && !message.starts_with("error:"),
+            "{message}"
+        );
+        assert!(!message.contains('\n'), "{message}");
+        assert!(usage.stderr.contains(message), "{}", usage.stderr);
+    }
+}
+
+#[test]
+fn without_json_a_usage_error_prints_nothing_on_stdout_and_help_stays_text() {
+    let usage = raw(&["nosuch"]);
+    assert_eq!(usage.code, 2);
     assert!(usage.stdout.is_empty());
     assert!(!usage.stderr.is_empty());
+    let help = raw(&["--json", "--help"]);
+    assert_eq!(help.code, 0);
+    assert!(help.stdout.contains("Usage"), "{}", help.stdout);
+    assert!(serde_json::from_str::<Value>(&help.stdout).is_err());
+    let version = raw(&["--json", "--version"]);
+    assert_eq!(version.code, 0);
+    assert!(version.stdout.starts_with("plaindb "), "{}", version.stdout);
+}
+
+fn large_store() -> TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Store::init(dir.path()).expect("init");
+    store.create_db("app").expect("db");
+    store
+        .create_collection("app", "notes", Format::Json)
+        .expect("collection");
+    let ops = (0..2000)
+        .map(|n| Op::Insert {
+            db: "app".to_owned(),
+            coll: "notes".to_owned(),
+            id: Some(format!("n{n:05}")),
+            doc: doc(json!({ "text": "x".repeat(200) })),
+        })
+        .collect();
+    store
+        .apply(Tx::new(ops))
+        .expect("the documents are written");
+    dir
+}
+
+fn through_closed_pipe(store: &Path, args: &str) -> (String, String) {
+    let script = format!(
+        "\"$0\" --store \"$1\" {args} 2>\"$1/stderr.txt\" | head -c 0; echo ${{PIPESTATUS[0]}}"
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .arg(env!("CARGO_BIN_EXE_plaindb"))
+        .arg(store)
+        .output()
+        .expect("bash runs");
+    let status = String::from_utf8(output.stdout)
+        .expect("text")
+        .trim()
+        .to_owned();
+    let stderr = fs::read_to_string(store.join("stderr.txt")).expect("stderr is kept");
+    (status, stderr)
+}
+
+#[test]
+fn a_reader_that_closes_the_pipe_ends_plaindb_quietly() {
+    let dir = large_store();
+    for args in [
+        "--json find app notes --all",
+        "find app notes --all",
+        "export app notes --jsonl",
+    ] {
+        let (status, stderr) = through_closed_pipe(dir.path(), args);
+        assert_eq!(status, "0", "{args}: {stderr}");
+        assert!(stderr.is_empty(), "{args}: {stderr}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_write_to_stdout_is_an_error() {
+    let dir = fixture(false);
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full opens");
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(dir.path())
+        .args(["--json", "count", "app", "notes"])
+        .stdout(full)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("stderr is text");
+    assert!(stderr.starts_with("error[io]: "), "{stderr}");
 }
 
 fn set_tree_writable(path: &Path, writable: bool) {
@@ -540,5 +659,6 @@ fn find_all_refuses_a_cursor_and_a_limit() {
             &["find", "app", "notes", "--all", extra[0], extra[1]],
         );
         assert_eq!(run.code, 2, "{extra:?}");
+        assert_eq!(run.json["error"]["code"], "usage", "{extra:?}");
     }
 }

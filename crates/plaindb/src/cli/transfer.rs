@@ -121,6 +121,25 @@ impl Drop for TempFile {
     }
 }
 
+struct WatchedPipe<W> {
+    inner: W,
+    broken: bool,
+}
+
+impl<W: Write> Write for WatchedPipe<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf).inspect_err(|error| {
+            self.broken |= error.kind() == std::io::ErrorKind::BrokenPipe;
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().inspect_err(|error| {
+            self.broken |= error.kind() == std::io::ErrorKind::BrokenPipe;
+        })
+    }
+}
+
 fn temp_path_beside(target: &Path) -> PathBuf {
     let name = target
         .file_name()
@@ -178,10 +197,17 @@ pub fn export(context: &Context, args: &ExportArgs) -> Result<Output> {
             ))
         }
         None => {
-            let mut out = BufWriter::new(std::io::stdout().lock());
-            store.export_jsonl(&args.db, &args.coll, &mut out)?;
-            out.flush()?;
-            Ok(Output::streamed())
+            let mut out = BufWriter::new(WatchedPipe {
+                inner: std::io::stdout().lock(),
+                broken: false,
+            });
+            let written = store
+                .export_jsonl(&args.db, &args.coll, &mut out)
+                .and_then(|_| out.flush().map_err(Error::from));
+            match written {
+                Err(_) if out.get_ref().broken => Ok(Output::streamed()),
+                other => other.map(|()| Output::streamed()),
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "doctor",
+  "description": "The report of doctor. When a check has the status error, the response is a failure with the code doctor_failed and this report under error.details.report.",
   "type": "object",
   "properties": {
     "errors": { "type": "integer", "minimum": 0 },

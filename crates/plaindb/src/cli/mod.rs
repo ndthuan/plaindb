@@ -14,7 +14,7 @@ use plaindb_core::{Error, ErrorCode, Op, Result, Store, Tx};
 use serde_json::{Value, json};
 
 use crate::mcp;
-use output::{Output, print_failure, print_success};
+use output::{Output, exit_after, print_cli_failure, print_failure, print_success};
 
 #[derive(Parser)]
 #[command(
@@ -266,16 +266,29 @@ pub fn execute(cli: Cli) -> ExitCode {
         tx_id: cli.tx_id,
     };
     tracing::debug!(store = %context.store.display(), "running a command");
+    let json = cli.json && !matches!(cli.command, Command::Mcp(_));
     match run(&context, cli.command) {
-        Ok(output) => {
-            print_success(cli.json, &output);
-            ExitCode::from(output.exit_code)
-        }
-        Err(error) => {
-            print_failure(cli.json, &error);
-            ExitCode::from(1)
-        }
+        Ok(output) => exit_after(print_success(json, &output), output.exit_code),
+        Err(error) => exit_after(print_failure(json, &error), 1),
     }
+}
+
+pub fn usage_error(json: bool, error: &clap::Error) -> ExitCode {
+    use clap::error::ErrorKind;
+    let shows_text = matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    if !json || shows_text {
+        error.exit();
+    }
+    let rendered = error.to_string();
+    let first = rendered.lines().next().unwrap_or_default();
+    let message = first.strip_prefix("error: ").unwrap_or(first);
+    let _ = error.print();
+    exit_after(print_cli_failure(true, "usage", message, json!({})), 2)
 }
 
 pub fn names_result(key: &str, names: &[String]) -> Value {

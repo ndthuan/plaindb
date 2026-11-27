@@ -1222,16 +1222,22 @@ fn init_refuses_git_options_without_git_before_creating_anything() {
 }
 
 fn exit_code(store: &Path, args: &[&str]) -> Option<i32> {
-    Command::new(env!("CARGO_BIN_EXE_plaindb"))
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
         .arg("--store")
         .arg(store)
         .arg("--json")
         .args(args)
         .stdin(Stdio::null())
         .output()
-        .expect("the binary runs")
-        .status
-        .code()
+        .expect("the binary runs");
+    if output.status.code() == Some(2) {
+        let stdout = String::from_utf8(output.stdout).expect("stdout is text");
+        assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
+        let parsed: Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+        assert_valid(&validator("response.schema.json"), &parsed);
+        assert_eq!(parsed["error"]["code"], "usage", "{parsed}");
+    }
+    output.status.code()
 }
 
 fn document_n(store: &Path) -> Value {

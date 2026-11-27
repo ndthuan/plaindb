@@ -822,3 +822,20 @@ fn a_server_on_a_directory_without_a_store_exits_before_answering() {
     let stderr = String::from_utf8(output.stderr).expect("stderr is text");
     assert!(stderr.contains("not_a_store"), "{stderr}");
 }
+
+#[test]
+fn a_server_prints_no_command_line_envelope_even_with_json() {
+    let dir = TempDir::new().expect("a temporary directory");
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--json")
+        .arg("mcp")
+        .arg("--store")
+        .arg(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is text");
+    assert!(stderr.contains("error[not_a_store]"), "{stderr}");
+}

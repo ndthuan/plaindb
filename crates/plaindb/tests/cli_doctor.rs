@@ -44,11 +44,35 @@ struct Doctor {
     result: Value,
 }
 
+fn response_validator() -> jsonschema::Validator {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/response.schema.json");
+    let text = fs::read_to_string(path).expect("the schema exists");
+    jsonschema::validator_for(&serde_json::from_str(&text).expect("the schema parses"))
+        .expect("the schema compiles")
+}
+
 fn doctor(store: &Path, flags: &[&str]) -> Doctor {
-    let output = plaindb(store, &[&["--json", "doctor"], flags].concat());
-    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
-    assert_eq!(parsed["ok"], true, "{parsed}");
-    let result = parsed["result"].clone();
+    read_doctor(&plaindb(store, &[&["--json", "doctor"], flags].concat()))
+}
+
+fn read_doctor(output: &Output) -> Doctor {
+    let stdout = String::from_utf8(output.stdout.clone()).expect("stdout is text");
+    assert_eq!(stdout.lines().count(), 1, "one line expected: {stdout:?}");
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert!(response_validator().is_valid(&parsed), "{parsed}");
+    let result = if parsed["ok"] == true {
+        assert_eq!(output.status.code(), Some(0), "{parsed}");
+        parsed["result"].clone()
+    } else {
+        assert_eq!(output.status.code(), Some(1), "{parsed}");
+        assert_eq!(parsed["error"]["code"], "doctor_failed", "{parsed}");
+        parsed["error"]["details"]["report"].clone()
+    };
+    assert_eq!(
+        parsed["ok"] == true,
+        result["errors"] == 0,
+        "ok follows the errors: {parsed}"
+    );
     let errors: Vec<String> = schema_validator()
         .iter_errors(&result)
         .map(|error| error.to_string())
@@ -163,13 +187,12 @@ fn plaindb_in(store: &Path, cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> 
 }
 
 fn doctor_in(store: &Path, cwd: &Path, env: &[(&str, &str)], flags: &[&str]) -> Doctor {
-    let output = plaindb_in(store, cwd, env, &[&["--json", "doctor"], flags].concat());
-    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
-    assert_eq!(parsed["ok"], true, "{parsed}");
-    Doctor {
-        code: output.status.code(),
-        result: parsed["result"].clone(),
-    }
+    read_doctor(&plaindb_in(
+        store,
+        cwd,
+        env,
+        &[&["--json", "doctor"], flags].concat(),
+    ))
 }
 
 fn marking_program(path: &Path, marker: &Path) {
@@ -624,4 +647,32 @@ fn a_head_off_the_branch_is_an_error_that_names_the_switch() {
         doctor(&fixture.store, &["--offline"]).status("git_head_branch"),
         "ok"
     );
+}
+
+#[test]
+fn a_failing_check_makes_the_json_line_a_failure_with_the_report() {
+    let fixture = fixture("off");
+    let lock = fixture.store.join(".git/index.lock");
+    fs::write(&lock, "").expect("the lock is written");
+    age(&lock, 11 * 60);
+    let output = plaindb(&fixture.store, &["--json", "doctor", "--offline"]);
+    assert_eq!(output.status.code(), Some(1));
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"]["code"], "doctor_failed");
+    assert_eq!(parsed["error"]["message"], "1 checks failed");
+    let report = &parsed["error"]["details"]["report"];
+    assert!(schema_validator().is_valid(report), "{report}");
+    assert!(
+        report["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .any(|check| check["id"] == "git_locks" && check["status"] == "error")
+    );
+    fs::remove_file(&lock).expect("the lock is removed");
+    let healthy = plaindb(&fixture.store, &["--json", "doctor", "--offline"]);
+    assert_eq!(healthy.status.code(), Some(0));
+    let parsed: Value = serde_json::from_slice(&healthy.stdout).expect("stdout is JSON");
+    assert_eq!(parsed["ok"], true);
 }

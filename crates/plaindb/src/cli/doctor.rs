@@ -1,5 +1,6 @@
 use clap::Args;
 use plaindb_core::doctor::{Check, CheckStatus, DoctorOptions, Group, inspect};
+use serde_json::json;
 
 use super::Context;
 use super::output::Output;
@@ -51,6 +52,13 @@ pub fn run(context: &Context, args: &DoctorArgs) -> Output {
             offline: args.offline,
         },
     );
-    let exit_code = u8::from(report.errors() > 0);
-    Output::lines(report.to_json(), lines(&report.checks)).with_exit_code(exit_code)
+    let output = Output::lines(report.to_json(), lines(&report.checks));
+    match report.errors() {
+        0 => output,
+        failed => output.with_exit_code(1).with_failure(
+            "doctor_failed",
+            format!("{failed} checks failed"),
+            json!({ "report": report.to_json() }),
+        ),
+    }
 }

@@ -17,7 +17,14 @@ fn init_logging() {
 }
 
 fn main() -> ExitCode {
-    let parsed = cli::Cli::parse();
+    let json = std::env::args_os()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json");
+    let parsed = match cli::Cli::try_parse() {
+        Ok(parsed) => parsed,
+        Err(error) => return cli::usage_error(json, &error),
+    };
     init_logging();
     plaindb_core::set_push_program(std::env::current_exe().ok());
     cli::execute(parsed)
