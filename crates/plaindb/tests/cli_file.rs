@@ -359,3 +359,35 @@ fn file_put_records_the_tx_id_and_actor_in_the_commit() {
     assert!(message.contains(tx_id), "{message}");
     assert!(message.contains("Sample Writer"), "{message}");
 }
+
+#[test]
+fn file_get_writes_to_a_bare_file_name_in_the_working_directory() {
+    let dir = store_with_note();
+    let run = json_run(
+        dir.path(),
+        Some("file_put"),
+        &[
+            "file", "put", "app", "notes", "n1", "--name", "a.bin", "--from", "-",
+        ],
+        Some(b"bytes"),
+    );
+    assert_eq!(run.code, 0, "{}", run.json);
+    let output = Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(dir.path())
+        .args([
+            "file", "get", "app", "notes", "n1", "--name", "a.bin", "--out", "copy.bin",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("the binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.path().join("copy.bin")).expect("the copy"),
+        b"bytes"
+    );
+}

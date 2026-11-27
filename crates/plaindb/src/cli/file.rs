@@ -143,7 +143,7 @@ pub fn get(context: &Context, args: &FileGetArgs, json: bool) -> Result<Output> 
         return Ok(Output::bytes(bytes));
     }
     let out = args.out.as_deref().unwrap_or(Path::new(STDOUT_NAME));
-    plaindb_core::write_atomic(out, &bytes)?;
+    plaindb_core::write_atomic(&std::path::absolute(out)?, &bytes)?;
     let value = described(&args.name, &meta);
     let line = format!("{} {} {}", args.name, meta.size, meta.sha256);
     Ok(Output::lines(value, vec![line]))
