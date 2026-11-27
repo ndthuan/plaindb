@@ -67,13 +67,14 @@ fn tests_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-fn readme() -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md")).unwrap()
+fn guarantees_doc() -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guarantees.md"))
+        .unwrap()
 }
 
-fn anchors_in(readme: &str) -> BTreeSet<String> {
+fn anchors_in(text: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    let mut rest = readme;
+    let mut rest = text;
     while let Some(start) = rest.find("<!-- g:") {
         let after = &rest[start + "<!-- g:".len()..];
         let Some(end) = after.find(" -->") else {
@@ -98,8 +99,8 @@ fn defines(tests_dir: &Path, test: &str) -> bool {
         .any(|line| line.trim_start().starts_with(&declaration))
 }
 
-fn problems(readme: &str, table: &[Row], tests_dir: &Path) -> Vec<String> {
-    let anchors = anchors_in(readme);
+fn problems(text: &str, table: &[Row], tests_dir: &Path) -> Vec<String> {
+    let anchors = anchors_in(text);
     let mut found = Vec::new();
     for anchor in &anchors {
         match table.iter().find(|row| row.anchor == anchor) {
@@ -113,7 +114,7 @@ fn problems(readme: &str, table: &[Row], tests_dir: &Path) -> Vec<String> {
     for row in table {
         if !anchors.contains(row.anchor) {
             found.push(format!(
-                "the row {} has no guarantee in the README",
+                "the row {} has no guarantee in docs/guarantees.md",
                 row.anchor
             ));
         }
@@ -130,8 +131,8 @@ fn problems(readme: &str, table: &[Row], tests_dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn every_guarantee_in_the_readme_maps_to_existing_tests() {
-    let found = problems(&readme(), TABLE, &tests_dir());
+fn every_guarantee_in_the_docs_maps_to_existing_tests() {
+    let found = problems(&guarantees_doc(), TABLE, &tests_dir());
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
 
@@ -149,7 +150,10 @@ fn a_row_without_a_guarantee_is_reported() {
         &TABLE[..2],
         &tests_dir(),
     );
-    assert_eq!(found, ["the row crash has no guarantee in the README"]);
+    assert_eq!(
+        found,
+        ["the row crash has no guarantee in docs/guarantees.md"]
+    );
 }
 
 #[test]

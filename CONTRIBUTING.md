@@ -8,4 +8,4 @@ To check a local checkout, run:
 
     make quality
 
-Security problems go through [SECURITY.md](SECURITY.md), not an issue.
+Security problems go through [SECURITY.md](.github/SECURITY.md), not an issue.

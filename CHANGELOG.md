@@ -2,6 +2,12 @@
 
 All notable changes to plaindb are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The documentation moved from the README into pages under `docs/`, and `SECURITY.md` into `.github/`.
+
 ## [0.1.0] - 2026-11-26
 
 First release.

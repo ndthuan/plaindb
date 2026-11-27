@@ -84,6 +84,7 @@ jobs:
           name="plaindb-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
           cp target/${{ matrix.target }}/release/plaindb LICENSE README.md "$name/"
+          cp -R docs "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           shasum -a 256 -c "$name.tar.gz.sha256"
