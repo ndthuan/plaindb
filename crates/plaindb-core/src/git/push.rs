@@ -204,7 +204,21 @@ fn push_with_retries(root: &Path, config: &StoreConfig) -> Result<()> {
     Err(push_failed(&failure))
 }
 
-pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<File>> {
+pub(super) struct LockedFile(File);
+
+impl LockedFile {
+    fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<LockedFile>> {
     let dir = root.join(STATE_DIR);
     ensure_dir(&dir, Durability::Full)?;
     let file = OpenOptions::new()
@@ -213,27 +227,35 @@ pub(super) fn try_lock_file(root: &Path, name: &str) -> Result<Option<File>> {
         .write(true)
         .open(dir.join(name))?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(LockedFile(file))),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(source)) => Err(source.into()),
     }
 }
 
-pub(crate) struct PushLock(File);
+pub(crate) struct PushLock(LockedFile);
+
+impl PushLock {
+    #[cfg(test)]
+    fn file(&self) -> &File {
+        self.0.file()
+    }
+}
 
 impl Drop for PushLock {
     fn drop(&mut self) {
-        let _ = self.0.set_len(0);
+        let _ = self.0.file().set_len(0);
     }
 }
 
 fn take_push_lock(root: &Path) -> Result<Option<PushLock>> {
-    let Some(mut file) = try_lock_file(root, PUSH_LOCK_FILE)? else {
+    let Some(held) = try_lock_file(root, PUSH_LOCK_FILE)? else {
         return Ok(None);
     };
+    let mut file = held.file();
     file.set_len(0)?;
     writeln!(file, "{} {}", std::process::id(), now_timestamp())?;
-    Ok(Some(PushLock(file)))
+    Ok(Some(PushLock(held)))
 }
 
 pub(crate) struct RunningPush {
@@ -588,5 +610,30 @@ impl Drop for PushGuard<'_> {
     fn drop(&mut self) {
         let _ = self.store.push_after(self.before.take());
         self.store.collect_if_due();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_released_push_lock_is_free_while_a_copy_of_its_file_stays_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = take_push_lock(dir.path()).unwrap().unwrap();
+        let copy = lock.file().try_clone().unwrap();
+        drop(lock);
+        assert!(take_push_lock(dir.path()).unwrap().is_some());
+        drop(copy);
+    }
+
+    #[test]
+    fn a_released_lock_file_is_free_while_a_copy_of_it_stays_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = try_lock_file(dir.path(), "probe.lock").unwrap().unwrap();
+        let copy = lock.file().try_clone().unwrap();
+        drop(lock);
+        assert!(try_lock_file(dir.path(), "probe.lock").unwrap().is_some());
+        drop(copy);
     }
 }
