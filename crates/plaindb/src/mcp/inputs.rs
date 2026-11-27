@@ -175,6 +175,10 @@ pub struct InsertInput {
     pub id: Option<String>,
     #[schemars(description = "The document, a JSON object")]
     pub doc: Map<String, Value>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -187,6 +191,10 @@ pub struct PutInput {
     pub doc: Map<String, Value>,
     #[schemars(description = "Write only when the document is at this version")]
     pub if_version: Option<String>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -199,6 +207,10 @@ pub struct PatchInput {
     pub patch: Value,
     #[schemars(description = "Write only when the document is at this version")]
     pub if_version: Option<String>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -209,6 +221,10 @@ pub struct DeleteInput {
     pub id: String,
     #[schemars(description = "Write only when the document is at this version")]
     pub if_version: Option<String>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -245,6 +261,10 @@ pub struct TxOp {
 pub struct TxInput {
     #[schemars(description = "Operations applied together: all of them or none")]
     pub ops: Vec<TxOp>,
+    #[schemars(
+        description = "Optional ULID naming this write. Repeat the call with the same value to retry safely: the write happens once."
+    )]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]

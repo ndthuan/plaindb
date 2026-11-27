@@ -149,6 +149,7 @@ async fn run_server(server: Server) -> Result<()> {
 }
 
 pub fn serve(context: &Context, args: &McpArgs) -> Result<Output> {
+    drop(context.open_reader()?);
     let server = Server::new(
         Context {
             store: context.store.clone(),

@@ -740,3 +740,85 @@ async fn a_read_only_server_answers_on_a_read_only_store_without_the_network() {
         "{calls}"
     );
 }
+
+#[tokio::test]
+async fn a_write_repeated_with_its_tx_id_happens_once() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    prepare(&session).await;
+    let tx_id = "01JABCDEFGHJKMNPQRSTVWXYZ0";
+    let arguments = json!({
+        "db": "app",
+        "collection": "notes",
+        "doc": {"title": "Once"},
+        "tx_id": tx_id,
+    });
+    let first = succeed(&session, "plaindb_insert", arguments.clone()).await;
+    let again = succeed(&session, "plaindb_insert", arguments).await;
+    assert_eq!(first["tx_id"], tx_id);
+    assert_eq!(again, first);
+    let counted = succeed(
+        &session,
+        "plaindb_count",
+        json!({"db": "app", "collection": "notes"}),
+    )
+    .await;
+    assert_eq!(counted["count"], 1);
+    for tool in [
+        "plaindb_put",
+        "plaindb_patch",
+        "plaindb_delete",
+        "plaindb_tx",
+    ] {
+        let listed = session
+            .list_all_tools()
+            .await
+            .expect("tools are listed")
+            .into_iter()
+            .find(|entry| entry.name == tool)
+            .expect("the tool is offered");
+        let schema = serde_json::to_value(&listed.input_schema).expect("a schema");
+        assert!(
+            schema["properties"]["tx_id"].is_object(),
+            "{tool}: {schema}"
+        );
+    }
+    session.cancel().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_bad_tx_id_is_refused_like_on_the_command_line() {
+    let (_dir, store) = new_store();
+    let session = start(&store, &[]).await;
+    prepare(&session).await;
+    let reply = call(
+        &session,
+        "plaindb_insert",
+        json!({"db": "app", "collection": "notes", "doc": {}, "tx_id": "abc"}),
+    )
+    .await;
+    assert!(reply.is_error);
+    let direct = cli(
+        &store,
+        &["--tx-id", "abc", "insert", "app", "notes", "--data", "{}"],
+    );
+    assert_eq!(reply.value["code"], direct["error"]["code"]);
+    assert_eq!(reply.value["code"], "invalid_name");
+    session.cancel().await.expect("the server stops");
+}
+
+#[test]
+fn a_server_on_a_directory_without_a_store_exits_before_answering() {
+    let dir = TempDir::new().expect("a temporary directory");
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(dir.path())
+        .arg("mcp")
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr is text");
+    assert!(stderr.contains("not_a_store"), "{stderr}");
+}

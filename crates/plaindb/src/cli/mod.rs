@@ -163,6 +163,7 @@ pub enum IndexCommand {
     Drop(admin::IndexDropArgs),
 }
 
+#[derive(Clone)]
 pub struct Context {
     pub store: PathBuf,
     pub actor: Option<String>,

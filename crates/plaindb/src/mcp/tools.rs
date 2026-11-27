@@ -86,6 +86,13 @@ where
     }
 }
 
+fn with_tx_id(context: &Context, tx_id: Option<String>) -> Context {
+    Context {
+        tx_id,
+        ..context.clone()
+    }
+}
+
 pub fn catalog() -> Vec<Tool> {
     use Access::{Drop, Read, Write};
     vec![
@@ -174,7 +181,7 @@ pub fn catalog() -> Vec<Tool> {
             "Adds a document that does not exist yet and returns its id and version.",
             |context, input: InsertInput| {
                 Ok(write::apply(
-                    context,
+                    &with_tx_id(context, input.tx_id),
                     vec![Op::Insert {
                         db: input.db,
                         coll: input.collection,
@@ -190,7 +197,7 @@ pub fn catalog() -> Vec<Tool> {
             "Writes a whole document, replacing any earlier one; if_version guards against lost updates.",
             |context, input: PutInput| {
                 Ok(write::apply(
-                    context,
+                    &with_tx_id(context, input.tx_id),
                     vec![Op::Put {
                         db: input.db,
                         coll: input.collection,
@@ -207,7 +214,7 @@ pub fn catalog() -> Vec<Tool> {
             "Changes a document with a JSON merge patch; if_version guards against lost updates.",
             |context, input: PatchInput| {
                 Ok(write::apply(
-                    context,
+                    &with_tx_id(context, input.tx_id),
                     vec![Op::Patch {
                         db: input.db,
                         coll: input.collection,
@@ -224,7 +231,7 @@ pub fn catalog() -> Vec<Tool> {
             "Removes a document; if_version guards against lost updates.",
             |context, input: DeleteInput| {
                 Ok(write::apply(
-                    context,
+                    &with_tx_id(context, input.tx_id),
                     vec![Op::Delete {
                         db: input.db,
                         coll: input.collection,
@@ -241,7 +248,10 @@ pub fn catalog() -> Vec<Tool> {
             |context, input: TxInput| {
                 let ops = serde_json::to_value(input.ops)
                     .map_err(|source| Failure::Arguments(source.to_string()))?;
-                Ok(write::apply(context, write::parse_ops(ops)?)?)
+                Ok(write::apply(
+                    &with_tx_id(context, input.tx_id),
+                    write::parse_ops(ops)?,
+                )?)
             },
         ),
         tool(

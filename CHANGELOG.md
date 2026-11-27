@@ -11,6 +11,7 @@ All notable changes to plaindb are listed here. The format follows [Keep a Chang
 - Every read sees each transaction whole, also across processes: scans hold a shared lock on `.plaindb/lock`, and a store whose lock file cannot be opened is scanned until nothing moved.
 - Read commands and MCP read tools open the store for reading: they change nothing but the index cache, never checkpoint the journal or touch `.git`, and work on a directory that cannot be written.
 - With git on and no `.git` directory, plaindb no longer starts a new repository by itself: writes fail with `git_disabled` and the reason `repository_missing` until `plaindb git enable`.
+- The MCP document write tools take an optional `tx_id`, so a lost answer can be retried without writing twice, and `plaindb mcp` exits with an error when its directory holds no store.
 - `plaindb_doctor` over MCP does not contact the remote unless `offline` is `false`.
 - A write that times out waiting for the lock no longer leaves a thread and an open file behind.
 - A damaged journal record followed by more data is kept in `.plaindb/journal.rejected-<id>` instead of being cut off, and `status` warns about it.

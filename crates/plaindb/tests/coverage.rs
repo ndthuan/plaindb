@@ -90,8 +90,20 @@ fn listed_tools() -> BTreeSet<String> {
         .build()
         .expect("a runtime");
     runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let initialised = StdCommand::new(env!("CARGO_BIN_EXE_plaindb"))
+            .arg("--store")
+            .arg(dir.path())
+            .arg("init")
+            .output()
+            .expect("the binary runs");
+        assert!(initialised.status.success());
         let mut command = Command::new(env!("CARGO_BIN_EXE_plaindb"));
-        command.arg("mcp").arg("--allow-drop");
+        command
+            .arg("--store")
+            .arg(dir.path())
+            .arg("mcp")
+            .arg("--allow-drop");
         let session =
             ().serve(TokioChildProcess::new(command).expect("the server starts"))
                 .await
