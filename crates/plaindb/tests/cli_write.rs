@@ -1220,3 +1220,135 @@ fn init_refuses_git_options_without_git_before_creating_anything() {
         &["init", "--git", "--remote", "/tmp/x.git"],
     );
 }
+
+fn exit_code(store: &Path, args: &[&str]) -> Option<i32> {
+    Command::new(env!("CARGO_BIN_EXE_plaindb"))
+        .arg("--store")
+        .arg(store)
+        .arg("--json")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary runs")
+        .status
+        .code()
+}
+
+fn document_n(store: &Path) -> Value {
+    succeed(store, "get", &["get", "app", "notes", "n1"])["doc"]["a"].clone()
+}
+
+#[test]
+fn patch_takes_data_or_a_file_and_exactly_one() {
+    let dir = store_with_collection("json");
+    succeed(
+        dir.path(),
+        "write",
+        &["put", "app", "notes", "n1", "--data", r#"{"b":1}"#],
+    );
+    let source = tempfile::tempdir().expect("a temp dir");
+    let file = source.path().join("p.json");
+    fs::write(&file, r#"{"a":1}"#).expect("a file");
+    succeed(
+        dir.path(),
+        "write",
+        &[
+            "patch",
+            "app",
+            "notes",
+            "n1",
+            "--file",
+            file.to_str().expect("a path"),
+        ],
+    );
+    assert_eq!(document_n(dir.path()), 1);
+    let from_stdin = exec(
+        dir.path(),
+        Some("write"),
+        &["patch", "app", "notes", "n1", "--file", "-"],
+        Some(r#"{"a":2}"#),
+    );
+    assert_eq!(from_stdin.code, 0, "{}", from_stdin.json);
+    assert_eq!(document_n(dir.path()), 2);
+    succeed(
+        dir.path(),
+        "write",
+        &["patch", "app", "notes", "n1", "--data", r#"{"a":3}"#],
+    );
+    assert_eq!(document_n(dir.path()), 3);
+    assert_eq!(
+        exit_code(dir.path(), &["patch", "app", "notes", "n1"]),
+        Some(2)
+    );
+    assert_eq!(
+        exit_code(
+            dir.path(),
+            &["patch", "app", "notes", "n1", "--data", "{}", "--file", "-"]
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn a_schema_is_set_from_data_a_file_or_standard_input() {
+    let dir = store_with_collection("json");
+    let set = succeed(
+        dir.path(),
+        "collection_ack",
+        &[
+            "collection",
+            "schema",
+            "set",
+            "app",
+            "notes",
+            "--data",
+            r#"{"type":"object"}"#,
+        ],
+    );
+    assert_eq!(set["has_schema"], true);
+    let from_stdin = exec(
+        dir.path(),
+        Some("collection_ack"),
+        &["collection", "schema", "set", "app", "notes", "--file", "-"],
+        Some(r#"{"type":"object"}"#),
+    );
+    assert_eq!(from_stdin.code, 0, "{}", from_stdin.json);
+    for args in [
+        vec![
+            "collection",
+            "schema",
+            "set",
+            "app",
+            "notes",
+            "--data",
+            "{}",
+            "--clear",
+        ],
+        vec![
+            "collection",
+            "schema",
+            "set",
+            "app",
+            "notes",
+            "--data",
+            "{}",
+            "--file",
+            "-",
+        ],
+        vec!["collection", "schema", "set", "app", "notes"],
+    ] {
+        assert_eq!(exit_code(dir.path(), &args), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn a_transaction_takes_inline_data() {
+    let dir = store_with_collection("json");
+    let ops = json!([
+        { "op": "insert", "db": "app", "collection": "notes", "id": "a", "doc": { "n": 1 } },
+        { "op": "insert", "db": "app", "collection": "notes", "id": "b", "doc": { "n": 2 } },
+    ]);
+    succeed(dir.path(), "write", &["tx", "--data", &ops.to_string()]);
+    assert_eq!(count(dir.path()), 2);
+    assert_eq!(exit_code(dir.path(), &["tx"]), Some(2));
+}

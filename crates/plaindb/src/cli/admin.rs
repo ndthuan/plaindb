@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
@@ -8,9 +7,10 @@ use plaindb_core::{
 };
 use serde_json::{Map, Value, json};
 
+use super::Context;
 use super::output::Output;
 use super::read::{CollectionArgs, DbArgs, invalid_entries};
-use super::{Context, parse_json};
+use super::write::read_json;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum PushArg {
@@ -84,7 +84,19 @@ pub struct CollectionCreateArgs {
 pub struct SchemaSetArgs {
     pub db: String,
     pub coll: String,
-    #[arg(long, conflicts_with = "clear", required_unless_present = "clear")]
+    #[arg(
+        long,
+        conflicts_with_all = ["file", "clear"],
+        required_unless_present_any = ["file", "clear"],
+        help = "The schema as JSON"
+    )]
+    pub data: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "clear",
+        required_unless_present_any = ["data", "clear"],
+        help = "File with the schema as JSON; - reads standard input"
+    )]
     pub file: Option<PathBuf>,
     #[arg(long, help = "Remove the schema")]
     pub clear: bool,
@@ -258,12 +270,14 @@ pub fn drop_collection(store: &Store, args: &CollectionArgs) -> Result<Output> {
 }
 
 pub fn set_schema(store: &Store, args: &SchemaSetArgs) -> Result<Output> {
-    let schema = match &args.file {
-        Some(path) => {
-            let text = fs::read_to_string(path)?;
-            Some(parse_json(ErrorCode::InvalidDocument, "the schema", &text)?)
-        }
-        None => None,
+    let schema = if args.clear {
+        None
+    } else {
+        Some(read_json(
+            args.data.as_deref(),
+            args.file.as_deref(),
+            "the schema",
+        )?)
     };
     set_schema_value(store, &args.db, &args.coll, schema)
 }

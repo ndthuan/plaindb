@@ -3,8 +3,8 @@ use std::path::Path;
 use clap::Args;
 use plaindb_core::codec::Doc;
 use plaindb_core::{
-    At, DEFAULT_HISTORY_LIMIT, Dir, Error, ErrorCode, InvalidFile, Query, Result, Store, Timestamp,
-    Version,
+    At, DEFAULT_HISTORY_LIMIT, Dir, Error, ErrorCode, FindResult, InvalidFile, Query, Result,
+    Store, Timestamp, Version,
 };
 use serde_json::{Value, json};
 
@@ -39,10 +39,16 @@ pub struct FindArgs {
     pub filter: Option<String>,
     #[arg(long, help = "Sort key as field or field:desc; repeat for more keys")]
     pub sort: Vec<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "all")]
     pub limit: Option<u64>,
-    #[arg(long, help = "The next_cursor of the previous page")]
+    #[arg(
+        long,
+        conflicts_with = "all",
+        help = "The next_cursor of the previous page"
+    )]
     pub cursor: Option<String>,
+    #[arg(long, help = "Read every page and return all matching documents")]
+    pub all: bool,
     #[arg(
         long,
         value_delimiter = ',',
@@ -129,15 +135,41 @@ pub fn find(store: &Store, args: &FindArgs) -> Result<Output> {
         .iter()
         .map(|text| parse_sort(text))
         .collect::<Result<Vec<_>>>()?;
-    let found = store.find(Query {
-        db: args.db.clone(),
-        coll: args.coll.clone(),
-        filter: filter_value(args.filter.as_deref())?,
-        sort,
-        limit: args.limit,
-        cursor: args.cursor.clone(),
-        fields: args.fields.clone(),
-    })?;
+    let filter = filter_value(args.filter.as_deref())?;
+    let cap = store.config().limits.max_results;
+    let mut found = FindResult {
+        docs: Vec::new(),
+        next_cursor: None,
+    };
+    let mut cursor = args.cursor.clone();
+    loop {
+        let page = store.find(Query {
+            db: args.db.clone(),
+            coll: args.coll.clone(),
+            filter: filter.clone(),
+            sort: sort.clone(),
+            limit: args.limit,
+            cursor,
+            fields: args.fields.clone(),
+        })?;
+        found.docs.extend(page.docs);
+        found.next_cursor = page.next_cursor;
+        if !args.all {
+            break;
+        }
+        if let Some(cap) = cap.filter(|cap| found.docs.len() as u64 > *cap) {
+            return Err(Error::new(
+                ErrorCode::LimitExceeded,
+                "the matches are more than limits.max_results allows",
+            )
+            .with_detail("limit", "max_results")
+            .with_detail("max", cap));
+        }
+        cursor = found.next_cursor.clone();
+        if cursor.is_none() {
+            break;
+        }
+    }
     let lines = found
         .docs
         .iter()

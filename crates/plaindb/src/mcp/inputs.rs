@@ -99,6 +99,7 @@ impl From<FindInput> for FindArgs {
             sort: input.sort,
             limit: input.limit,
             cursor: input.cursor,
+            all: false,
             fields: input.fields,
         }
     }

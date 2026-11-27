@@ -25,6 +25,31 @@ pub struct DocumentSource {
 }
 
 #[derive(Args)]
+#[group(required = true, multiple = false)]
+pub struct JsonSource {
+    #[arg(long, help = "The value as JSON")]
+    pub data: Option<String>,
+    #[arg(long, help = "File with the value as JSON; - reads standard input")]
+    pub file: Option<PathBuf>,
+}
+
+impl JsonSource {
+    pub fn read(&self, what: &str) -> Result<Value> {
+        read_json(self.data.as_deref(), self.file.as_deref(), what)
+    }
+}
+
+pub fn read_json(data: Option<&str>, file: Option<&Path>, what: &str) -> Result<Value> {
+    let text = match (data, file) {
+        (Some(data), _) => data.to_owned(),
+        (None, Some(path)) => String::from_utf8(read_bytes(path)?)
+            .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))?,
+        (None, None) => unreachable!("clap requires a source"),
+    };
+    parse_json(ErrorCode::InvalidDocument, what, &text)
+}
+
+#[derive(Args)]
 pub struct InsertArgs {
     pub db: String,
     pub coll: String,
@@ -50,8 +75,8 @@ pub struct PatchArgs {
     pub db: String,
     pub coll: String,
     pub id: String,
-    #[arg(long, help = "The merge patch as JSON")]
-    pub data: String,
+    #[command(flatten)]
+    pub source: JsonSource,
     #[arg(long, help = "Write only when the document is at this version")]
     pub if_version: Option<String>,
 }
@@ -67,11 +92,8 @@ pub struct DeleteArgs {
 
 #[derive(Args)]
 pub struct TxArgs {
-    #[arg(
-        long,
-        help = "JSON file with a list of operations; - reads standard input"
-    )]
-    pub file: PathBuf,
+    #[command(flatten)]
+    pub source: JsonSource,
 }
 
 fn read_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -182,7 +204,7 @@ pub fn put(context: &Context, args: &PutArgs) -> Result<Output> {
 }
 
 pub fn patch(context: &Context, args: &PatchArgs) -> Result<Output> {
-    let patch = parse_json(ErrorCode::InvalidDocument, "the patch", &args.data)?;
+    let patch = args.source.read("the patch")?;
     apply(
         context,
         vec![Op::Patch {
@@ -294,13 +316,6 @@ pub fn parse_ops(value: Value) -> Result<Vec<Op>> {
 }
 
 pub fn transaction(context: &Context, args: &TxArgs) -> Result<Output> {
-    let bytes = read_bytes(&args.file)?;
-    let text = String::from_utf8(bytes)
-        .map_err(|source| Error::invalid_document("not_utf8", source.to_string()))?;
-    let ops = parse_ops(parse_json(
-        ErrorCode::InvalidDocument,
-        "the transaction file",
-        &text,
-    )?)?;
+    let ops = parse_ops(args.source.read("the transaction")?)?;
     apply(context, ops)
 }

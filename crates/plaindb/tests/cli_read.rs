@@ -480,3 +480,65 @@ fn a_read_leaves_the_journal_and_the_repository_alone() {
     assert_eq!(journal_after, journal_before);
     assert_eq!(files_under(&dir.path().join(".git")), git_before);
 }
+
+fn store_with_documents(count: u64) -> TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = Store::init(dir.path()).expect("the store initialises");
+    store.create_db("app").expect("a db");
+    store
+        .create_collection("app", "notes", Format::Json)
+        .expect("a collection");
+    let ops = (0..count)
+        .map(|n| Op::Put {
+            db: "app".to_owned(),
+            coll: "notes".to_owned(),
+            id: format!("n{n:04}"),
+            doc: doc(json!({ "n": n })),
+            if_version: None,
+        })
+        .collect();
+    store.apply(Tx::new(ops)).expect("documents are written");
+    dir
+}
+
+#[test]
+fn find_all_returns_every_page_in_one_result() {
+    let dir = store_with_documents(250);
+    let run = plaindb(
+        dir.path(),
+        Some("find"),
+        &["find", "app", "notes", "--all", "--sort", "n"],
+    );
+    assert_eq!(run.code, 0, "{}", run.json);
+    let docs = run.json["result"]["docs"].as_array().expect("docs");
+    assert_eq!(docs.len(), 250);
+    assert_eq!(docs[249]["doc"]["_id"], "n0249");
+    assert!(run.json["result"]["next_cursor"].is_null());
+}
+
+#[test]
+fn find_all_stops_at_the_result_limit() {
+    let dir = store_with_documents(250);
+    let set = plaindb(
+        dir.path(),
+        None,
+        &["config", "set", "limits.max_results", "200"],
+    );
+    assert_eq!(set.code, 0, "{}", set.json);
+    let run = plaindb(dir.path(), None, &["find", "app", "notes", "--all"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(run.json["error"]["code"], "limit_exceeded");
+}
+
+#[test]
+fn find_all_refuses_a_cursor_and_a_limit() {
+    let dir = store_with_documents(3);
+    for extra in [["--limit", "5"], ["--cursor", "abc"]] {
+        let run = plaindb(
+            dir.path(),
+            None,
+            &["find", "app", "notes", "--all", extra[0], extra[1]],
+        );
+        assert_eq!(run.code, 2, "{extra:?}");
+    }
+}
